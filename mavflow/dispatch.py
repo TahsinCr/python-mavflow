@@ -8,7 +8,6 @@ from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from ._contracts import _copy_model_value, _freeze_model_value
 from .application import MavlinkApplicationPacket
 from .peer import MavlinkApplicationPeer
 
@@ -28,7 +27,11 @@ class MavlinkApplicationResult:
             response_type = "system.ack" if self.accepted else "system.error"
         object.__setattr__(self, "accepted", bool(self.accepted))
         object.__setattr__(self, "message", str(self.message))
-        object.__setattr__(self, "payload", _freeze_model_value(self.payload))
+        object.__setattr__(
+            self,
+            "payload",
+            MavlinkApplicationPacket._freeze_payload_value(self.payload),
+        )
         object.__setattr__(self, "response_type", response_type)
 
     @classmethod
@@ -300,7 +303,7 @@ class MavlinkApplicationDispatcher:
         request: MavlinkApplicationPacket,
         result: MavlinkApplicationResult,
     ) -> None:
-        payload = _copy_model_value(result.payload, lists=True)
+        payload = MavlinkApplicationPacket._copy_payload_value(result.payload)
         payload.update(
             {
                 "request_id": request.packet_id,

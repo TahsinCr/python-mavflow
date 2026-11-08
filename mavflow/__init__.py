@@ -15,6 +15,7 @@ from .cache import MessageCache
 from .channel import MavlinkAsyncChannel
 from .client import MavlinkClient
 from .connection import MavlinkConnection, MavlinkUnavailableError
+from .contracts import MavlinkHeader, MavlinkMessage
 from .dispatch import (
     MavlinkApplicationDispatch,
     MavlinkApplicationDispatcher,
@@ -30,7 +31,6 @@ from .peer import (
     MavlinkApplicationPeerState,
     MavlinkApplicationResponse,
 )
-from .protocols import MavlinkHeader, MavlinkMessage
 from .remote_log import (
     REMOTE_LOG_MAX_BATCH_BYTES,
     REMOTE_LOG_MAX_BATCH_RECORDS,

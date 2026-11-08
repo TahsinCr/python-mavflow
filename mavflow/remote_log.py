@@ -5,11 +5,12 @@ import math
 import re
 import time
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from ._compatibility import StrEnum
-from ._contracts import _copy_model_value, _freeze_model_value
 
 REMOTE_LOG_PACKET_TYPE = "logs.push"
 REMOTE_LOG_PROTOCOL_VERSION = 1
@@ -54,13 +55,45 @@ class MavlinkRemoteLogRecord:
     device_id: str | None = None
     correlation_id: str | None = None
 
+    @staticmethod
+    def _freeze_details_value(value: Any) -> Any:
+        """Detach and recursively freeze a value stored in log details."""
+        if isinstance(value, Mapping):
+            return MappingProxyType(
+                {
+                    deepcopy(key): MavlinkRemoteLogRecord._freeze_details_value(item)
+                    for key, item in value.items()
+                }
+            )
+        if isinstance(value, (tuple, list)):
+            return tuple(MavlinkRemoteLogRecord._freeze_details_value(item) for item in value)
+        if isinstance(value, (set, frozenset)):
+            return frozenset(MavlinkRemoteLogRecord._freeze_details_value(item) for item in value)
+        return deepcopy(value)
+
+    @staticmethod
+    def _copy_details_value(value: Any) -> Any:
+        """Return a detached mutable representation of a log details value."""
+        if isinstance(value, Mapping):
+            return {
+                deepcopy(key): MavlinkRemoteLogRecord._copy_details_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, tuple):
+            return [MavlinkRemoteLogRecord._copy_details_value(item) for item in value]
+        if isinstance(value, list):
+            return [MavlinkRemoteLogRecord._copy_details_value(item) for item in value]
+        if isinstance(value, (set, frozenset)):
+            return {MavlinkRemoteLogRecord._copy_details_value(item) for item in value}
+        return deepcopy(value)
+
     def __post_init__(self) -> None:
         sequence = int(self.sequence)
         source = str(self.source).strip().upper()
         action = str(self.action).strip().lower()
         message = str(self.message).strip()
         emitted_at = float(self.emitted_at)
-        details = _copy_model_value(self.details, lists=True)
+        details = self._copy_details_value(self.details)
         if sequence <= 0:
             raise ValueError("Remote log sequence must be positive")
         if not source or len(source) > 64:
@@ -92,7 +125,7 @@ class MavlinkRemoteLogRecord:
         object.__setattr__(self, "message", message)
         object.__setattr__(self, "level", MavlinkRemoteLogLevel(self.level))
         object.__setattr__(self, "emitted_at", emitted_at)
-        object.__setattr__(self, "details", _freeze_model_value(details))
+        object.__setattr__(self, "details", self._freeze_details_value(details))
         object.__setattr__(self, "device_id", device_id)
         object.__setattr__(self, "correlation_id", correlation_id)
 
@@ -104,7 +137,7 @@ class MavlinkRemoteLogRecord:
             "message": self.message,
             "level": self.level.value,
             "at": self.emitted_at,
-            "details": _copy_model_value(self.details, lists=True),
+            "details": self._copy_details_value(self.details),
         }
         if self.device_id is not None:
             payload["device_id"] = self.device_id

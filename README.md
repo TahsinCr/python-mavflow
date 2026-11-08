@@ -543,6 +543,9 @@ The package exports these public names:
 | Application protocol | `MavlinkApplicationPacket`, `MavlinkApplicationCodec`, `MavlinkApplicationAssembler`, `MavlinkApplicationChannel`, `MavlinkApplicationPeer`, `MavlinkApplicationDispatcher`, `MavlinkApplicationHandlerRegistry`, `MavlinkApplicationResult`, `MavlinkApplicationResponse` |
 | Remote logs | `MavlinkRemoteLogLevel`, `MavlinkRemoteLogRecord`, `MavlinkRemoteLogBatch` |
 
+`MavlinkHeader` and `MavlinkMessage` are defined in `mavflow.contracts` and
+re-exported from `mavflow`.
+
 Key error types include `MavlinkUnavailableError`, `MavlinkRouterError`,
 `MavlinkRuntimeError`, and `MavlinkApplicationProtocolError`. Import the
 specific error classes from `mavflow` when an application needs to handle them.

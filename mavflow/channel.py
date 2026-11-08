@@ -6,8 +6,8 @@ from collections import deque
 
 from eventflow import Subscription
 
+from .contracts import MavlinkMessage
 from .filter import MavlinkMessageFilter, MessageTypeInput
-from .protocols import MavlinkMessage
 from .router import MavlinkMessageRouter
 
 

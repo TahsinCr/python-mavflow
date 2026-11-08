@@ -546,6 +546,9 @@ Paket aşağıdaki public isimleri dışa aktarır:
 | Uygulama protokolü | `MavlinkApplicationPacket`, `MavlinkApplicationCodec`, `MavlinkApplicationAssembler`, `MavlinkApplicationChannel`, `MavlinkApplicationPeer`, `MavlinkApplicationDispatcher`, `MavlinkApplicationHandlerRegistry`, `MavlinkApplicationResult`, `MavlinkApplicationResponse` |
 | Uzak log | `MavlinkRemoteLogLevel`, `MavlinkRemoteLogRecord`, `MavlinkRemoteLogBatch` |
 
+`MavlinkHeader` ve `MavlinkMessage`, `mavflow.contracts` modülünde tanımlanır
+ve `mavflow` paketinden de dışa aktarılır.
+
 Önemli hata tipleri arasında `MavlinkUnavailableError`,
 `MavlinkRouterError`, `MavlinkRuntimeError` ve
 `MavlinkApplicationProtocolError` bulunur. Uygulamanın özel olarak işlemesi

@@ -20,6 +20,9 @@ All notable changes to Mavflow are documented here.
 
 - Keep component lifecycle management in Mavflow instead of inheriting the
   lifecycle base copied from Vehicle Autonomy Core.
+- Expose MAVLink structural protocols from the public `mavflow.contracts`
+  module and keep payload immutability behavior with its owning data models.
+- Remove the copied private `_contracts.py` helper module.
 - Make the `mavflow` package importable without the Vehicle Autonomy Core source
   tree; defer importing `pymavlink` until a real transport is opened.
 - Replace copied EventFlow documentation, examples, tests, benchmark records,

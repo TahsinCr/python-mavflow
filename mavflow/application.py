@@ -8,12 +8,13 @@ import threading
 import time
 import zlib
 from collections.abc import Mapping
+from copy import deepcopy
 from dataclasses import dataclass, field
+from types import MappingProxyType
 from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from ._contracts import _copy_model_value, _freeze_model_value
 from .client import MavlinkClient
 from .filter import (
     MavlinkMessageFilter,
@@ -63,6 +64,38 @@ class MavlinkApplicationPacket:
     source_component: int | None = None
     expects_response: bool = False
 
+    @staticmethod
+    def _freeze_payload_value(value: Any) -> Any:
+        """Detach and recursively freeze a value stored in a packet payload."""
+        if isinstance(value, Mapping):
+            return MappingProxyType(
+                {
+                    deepcopy(key): MavlinkApplicationPacket._freeze_payload_value(item)
+                    for key, item in value.items()
+                }
+            )
+        if isinstance(value, (tuple, list)):
+            return tuple(MavlinkApplicationPacket._freeze_payload_value(item) for item in value)
+        if isinstance(value, (set, frozenset)):
+            return frozenset(MavlinkApplicationPacket._freeze_payload_value(item) for item in value)
+        return deepcopy(value)
+
+    @staticmethod
+    def _copy_payload_value(value: Any) -> Any:
+        """Return a detached mutable representation of a packet payload value."""
+        if isinstance(value, Mapping):
+            return {
+                deepcopy(key): MavlinkApplicationPacket._copy_payload_value(item)
+                for key, item in value.items()
+            }
+        if isinstance(value, tuple):
+            return [MavlinkApplicationPacket._copy_payload_value(item) for item in value]
+        if isinstance(value, list):
+            return [MavlinkApplicationPacket._copy_payload_value(item) for item in value]
+        if isinstance(value, (set, frozenset)):
+            return {MavlinkApplicationPacket._copy_payload_value(item) for item in value}
+        return deepcopy(value)
+
     def __post_init__(self) -> None:
         normalized_type = self.packet_type.strip().lower()
         if not normalized_type:
@@ -78,7 +111,7 @@ class MavlinkApplicationPacket:
             raise ValueError("Uygulama paket zamanı pozitif ve sonlu olmalı")
         if not isinstance(self.payload, Mapping):
             raise ValueError("Uygulama paket payload değeri nesne olmalı")
-        payload = _copy_model_value(self.payload, lists=True)
+        payload = self._copy_payload_value(self.payload)
         try:
             json.dumps(payload, ensure_ascii=False, allow_nan=False)
         except (TypeError, ValueError) as exc:
@@ -89,7 +122,7 @@ class MavlinkApplicationPacket:
             "source_component",
         )
         object.__setattr__(self, "packet_type", normalized_type)
-        object.__setattr__(self, "payload", _freeze_model_value(payload))
+        object.__setattr__(self, "payload", self._freeze_payload_value(payload))
         object.__setattr__(self, "packet_id", int(self.packet_id))
         object.__setattr__(self, "sent_at", sent_at)
         object.__setattr__(self, "source_system", source_system)
@@ -99,7 +132,7 @@ class MavlinkApplicationPacket:
     def to_dict(self) -> dict[str, Any]:
         return {
             "packet_type": self.packet_type,
-            "payload": _copy_model_value(self.payload, lists=True),
+            "payload": self._copy_payload_value(self.payload),
             "packet_id": self.packet_id,
             "sent_at": self.sent_at,
             "source_system": self.source_system,
@@ -138,7 +171,7 @@ class MavlinkApplicationCodec:
             body = json.dumps(
                 {
                     "type": packet.packet_type,
-                    "payload": _copy_model_value(packet.payload, lists=True),
+                    "payload": packet._copy_payload_value(packet.payload),
                     "sent_at": packet.sent_at,
                     "reply": packet.expects_response,
                 },

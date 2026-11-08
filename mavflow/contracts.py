@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
+__all__ = ["MavlinkHeader", "MavlinkMessage"]
+
 
 @runtime_checkable
 class MavlinkHeader(Protocol):
