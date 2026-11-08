@@ -18,6 +18,7 @@ All notable changes to Mavflow are documented here.
 
 ### Changed
 
+- Upgrade GitHub Actions checkout and Python setup to Node.js 24-compatible releases.
 - Use the `backports.strenum` and `exceptiongroup` packages for Python 3.10
   compatibility instead of local implementations; use built-ins on Python 3.11+.
 - Keep component lifecycle management in Mavflow instead of inheriting the
