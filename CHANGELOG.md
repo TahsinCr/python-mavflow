@@ -18,6 +18,8 @@ All notable changes to Mavflow are documented here.
 
 ### Changed
 
+- Use the `backports.strenum` and `exceptiongroup` packages for Python 3.10
+  compatibility instead of local implementations; use built-ins on Python 3.11+.
 - Keep component lifecycle management in Mavflow instead of inheriting the
   lifecycle base copied from Vehicle Autonomy Core.
 - Expose MAVLink structural protocols from the public `mavflow.contracts`
