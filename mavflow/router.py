@@ -9,7 +9,6 @@ from typing import Any, cast
 
 from eventflow import EventBus, Subscription
 
-from ._contracts import Service
 from .cache import MessageCache
 from .connection import MavlinkConnection
 from .filter import (
@@ -47,7 +46,7 @@ class _Route:
     callback: Callable[[Any], None]
 
 
-class MavlinkMessageRouter(Service):
+class MavlinkMessageRouter:
     """Single connection reader and filtered MAVLink message backbone.
 
     ``messages`` remains available for legacy unfiltered subscriptions. New

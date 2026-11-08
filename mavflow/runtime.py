@@ -10,7 +10,6 @@ from typing import Any
 from eventflow import EventBus, Subscription
 
 from ._compatibility import ExceptionGroup
-from ._contracts import Service
 from .application import MavlinkApplicationChannel, MavlinkApplicationPacket
 from .client import MavlinkClient
 from .dispatch import (
@@ -38,7 +37,7 @@ class MavlinkRuntimeState:
     router: MavlinkRouterStats
 
 
-class MavlinkRuntime(Service):
+class MavlinkRuntime:
     """Offer one lifecycle and a small API for telemetry and application data."""
 
     def __init__(
@@ -139,25 +138,25 @@ class MavlinkRuntime(Service):
                 raise RuntimeError("MAVLink runtime cleanup must complete before restart")
             if self._running:
                 return
-        started: list[Service] = []
+        started_stops: list[Callable[[], None]] = []
         try:
             self.client.start()
-            started.append(self.client)
+            started_stops.append(self.client.stop)
             if self.peer is not None:
                 self.peer.start()
-                started.append(self.peer)
+                started_stops.append(self.peer.stop)
             elif self.channel is not None:
                 self.channel.start()
-                started.append(self.channel)
+                started_stops.append(self.channel.stop)
             if self.dispatcher is not None:
                 self.dispatcher.start()
-                started.append(self.dispatcher)
+                started_stops.append(self.dispatcher.stop)
         except Exception as exc:
             self._publish_error("start", exc)
             cleanup_failed = False
-            for service in reversed(started):
+            for stop_component in reversed(started_stops):
                 try:
-                    service.stop()
+                    stop_component()
                 except Exception as stop_error:
                     cleanup_failed = True
                     self._publish_error("rollback", stop_error)
@@ -175,19 +174,19 @@ class MavlinkRuntime(Service):
                 return
             self._running = False
             self._cleanup_pending = True
-        services: list[Service] = []
+        stop_callbacks: list[Callable[[], None]] = []
         if self.dispatcher is not None:
-            services.append(self.dispatcher)
+            stop_callbacks.append(self.dispatcher.stop)
         if self.peer is not None:
-            services.append(self.peer)
+            stop_callbacks.append(self.peer.stop)
         elif self.channel is not None:
-            services.append(self.channel)
-        services.append(self.client)
+            stop_callbacks.append(self.channel.stop)
+        stop_callbacks.append(self.client.stop)
 
         errors: list[Exception] = []
-        for service in services:
+        for stop_component in stop_callbacks:
             try:
-                service.stop()
+                stop_component()
             except Exception as exc:
                 errors.append(exc)
                 self._publish_error("stop", exc)

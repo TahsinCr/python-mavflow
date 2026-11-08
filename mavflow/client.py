@@ -5,14 +5,13 @@ from typing import Any
 
 from eventflow import Subscription
 
-from ._contracts import Service
 from .connection import MavlinkConnection
 from .endpoint import MavlinkEndpoint
 from .filter import MavlinkMessageFilter, MessagePredicate, MessageTypeInput
 from .router import MavlinkMessageRouter
 
 
-class MavlinkClient(Service):
+class MavlinkClient:
     """Combine connection and router lifecycles behind one modular interface."""
 
     def __init__(

@@ -13,7 +13,7 @@ from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from ._contracts import Service, _copy_model_value, _freeze_model_value
+from ._contracts import _copy_model_value, _freeze_model_value
 from .client import MavlinkClient
 from .filter import (
     MavlinkMessageFilter,
@@ -355,7 +355,7 @@ class MavlinkApplicationAssembler:
         self._next_prune_at = now + min(self._fragment_timeout, 1.0)
 
 
-class MavlinkApplicationChannel(Service):
+class MavlinkApplicationChannel:
     """Targeted bidirectional application channel over an existing MAVLink router.
 
     It opens no additional serial reader and shares the MAVLink connection and

@@ -1,26 +1,11 @@
-"""Private lifecycle and immutable-model helpers used by Mavflow."""
+"""Private immutable-model helpers used by Mavflow."""
 
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 from collections.abc import Mapping
 from copy import deepcopy
 from types import MappingProxyType
 from typing import Any
-
-
-class Service(ABC):
-    """Lifecycle contract for services owned by a Mavlink runtime."""
-
-    __slots__ = ()
-
-    @abstractmethod
-    def start(self) -> None:
-        """Prepare the service for use."""
-
-    @abstractmethod
-    def stop(self) -> None:
-        """Close resources owned by the service safely."""
 
 
 def _freeze_model_value(value: Any) -> Any:
@@ -55,6 +40,3 @@ def _copy_model_value(value: Any, *, lists: bool = False) -> Any:
     if isinstance(value, frozenset):
         return {_copy_model_value(item, lists=lists) for item in value}
     return deepcopy(value)
-
-
-__all__ = ["Service"]

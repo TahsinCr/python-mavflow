@@ -6,13 +6,12 @@ from collections import deque
 
 from eventflow import Subscription
 
-from ._contracts import Service
 from .filter import MavlinkMessageFilter, MessageTypeInput
 from .protocols import MavlinkMessage
 from .router import MavlinkMessageRouter
 
 
-class MavlinkAsyncChannel(Service):
+class MavlinkAsyncChannel:
     """Bounded, filtered bridge from the router thread into asyncio."""
 
     def __init__(

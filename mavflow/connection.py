@@ -7,7 +7,6 @@ from typing import Any
 
 from eventflow import EventBus
 
-from ._contracts import Service
 from .endpoint import MavlinkEndpoint
 from .filter import MessageTypeInput, normalize_message_types
 
@@ -18,7 +17,7 @@ class MavlinkUnavailableError(RuntimeError):
     pass
 
 
-class MavlinkConnection(Service):
+class MavlinkConnection:
     """Own a pymavlink connection and provide thread-safe I/O access."""
 
     UDP_DISCOVERY_INTERVAL_S = 1.0

@@ -8,7 +8,7 @@ from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from ._contracts import Service, _copy_model_value, _freeze_model_value
+from ._contracts import _copy_model_value, _freeze_model_value
 from .application import MavlinkApplicationPacket
 from .peer import MavlinkApplicationPeer
 
@@ -110,7 +110,7 @@ class MavlinkApplicationHandlerRegistry:
             return entry[1] if entry is not None else None
 
 
-class MavlinkApplicationDispatcher(Service):
+class MavlinkApplicationDispatcher:
     """Route application packets without blocking the MAVLink receive thread.
 
     Handlers are registered by packet type. Notifications are handled without

@@ -9,7 +9,6 @@ from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from ._contracts import Service
 from .application import (
     MavlinkApplicationChannel,
     MavlinkApplicationPacket,
@@ -53,7 +52,7 @@ class _PendingRequest:
     error: str = ""
 
 
-class MavlinkApplicationPeer(Service):
+class MavlinkApplicationPeer:
     """Manage liveness and correlated messages over one application channel.
 
     The peer owns no serial or network transport. It uses the supplied
