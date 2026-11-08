@@ -1,0 +1,28 @@
+# Python environments and generated files
+.venv/
+__pycache__/
+*.py[cod]
+*.so
+*.egg-info/
+build/
+dist/
+
+# Test, coverage, and tooling caches
+.pytest_cache/
+.coverage
+.coverage.*
+htmlcov/
+.mypy_cache/
+.pyright/
+.ruff_cache/
+
+# Local IDE and agent state; never include the Serena project directory in Git
+.serena/
+.idea/
+.vscode/
+*.swp
+*~
+
+# Runtime logs
+*.log
+/logs/

@@ -1,0 +1,7 @@
+include LICENSE README.md README-TR.md CHANGELOG.md
+include run_tests.py
+include mavflow/py.typed
+recursive-include tests *.py
+recursive-include examples *.py
+recursive-include benchmarks *.py *.md *.json
+global-exclude *.py[cod]
