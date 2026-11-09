@@ -28,6 +28,11 @@ All notable changes to Mavflow are documented here.
 - Remove duplicate peer packet publication; the peer exposes the application
   channel's EventFlow packet bus directly.
 
+### Fixed
+
+- Install EventFlow 1.4.0 from its pinned upstream commit in GitHub Actions while
+  that required version is not yet available on PyPI.
+
 ## [v1.0] - 2026-11-09
 
 ### Added
