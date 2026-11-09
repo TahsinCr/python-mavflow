@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Any, Protocol, runtime_checkable
 
-__all__ = ["MavlinkHeader", "MavlinkMessage"]
+__all__ = ["MavHeader", "MavMessage"]
 
 
 @runtime_checkable
-class MavlinkHeader(Protocol):
+class MavHeader(Protocol):
     """Required fields from a pymavlink MAVLink message header."""
 
     msgId: int
@@ -16,14 +16,14 @@ class MavlinkHeader(Protocol):
 
 
 @runtime_checkable
-class MavlinkMessage(Protocol):
+class MavMessage(Protocol):
     """Dialect-independent base pymavlink message contract."""
 
     id: int
     msgname: str
     fieldnames: list[str]
 
-    def get_header(self) -> MavlinkHeader: ...
+    def get_header(self) -> MavHeader: ...
     def get_type(self) -> str: ...
     def get_msgId(self) -> int: ...
     def get_srcSystem(self) -> int: ...

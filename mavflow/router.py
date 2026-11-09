@@ -10,18 +10,18 @@ from typing import Any, cast
 from eventflow import EventBus, Subscription
 
 from .cache import MessageCache
-from .connection import MavlinkConnection
+from .connection import MavConnection
 from .filter import (
-    MavlinkMessageFilter,
+    MavMessageFilter,
     MessagePredicate,
     MessageTypeInput,
     coerce_message_filter,
 )
-from .message import MavlinkMessageEnvelope
+from .message import MavMessageEnvelope
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkRouterStats:
+class MavRouterStats:
     running: bool
     sequence: int
     received_messages: int
@@ -34,19 +34,19 @@ class MavlinkRouterStats:
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkRouterError:
+class MavRouterError:
     phase: str
     error: Exception
-    envelope: MavlinkMessageEnvelope | None = None
+    envelope: MavMessageEnvelope | None = None
 
 
 @dataclass(slots=True)
 class _Route:
-    message_filter: MavlinkMessageFilter
+    message_filter: MavMessageFilter
     callback: Callable[[Any], None]
 
 
-class MavlinkMessageRouter:
+class MavMessageRouter:
     """Single connection reader and filtered MAVLink message backbone.
 
     ``messages`` remains available for legacy unfiltered subscriptions. New
@@ -56,7 +56,7 @@ class MavlinkMessageRouter:
 
     def __init__(
         self,
-        connection: MavlinkConnection,
+        connection: MavConnection,
         *,
         history_limit: int = 512,
         cache_per_type: int = 64,
@@ -74,13 +74,13 @@ class MavlinkMessageRouter:
             raise ValueError("stop_timeout pozitif olmalı")
         self.connection = connection
         self.messages = EventBus[Any]()
-        self.envelopes = EventBus[MavlinkMessageEnvelope]()
-        self.errors = EventBus[MavlinkRouterError]()
+        self.envelopes = EventBus[MavMessageEnvelope]()
+        self.errors = EventBus[MavRouterError]()
         self.cache = MessageCache[Any, str](
             lambda message: str(message.get_type()).upper(),
             per_key_limit=cache_per_type,
         )
-        self._history: deque[MavlinkMessageEnvelope] = deque(maxlen=history_limit)
+        self._history: deque[MavMessageEnvelope] = deque(maxlen=history_limit)
         self._poll_timeout = poll_timeout
         self._error_backoff = error_backoff
         self._stop_timeout = float(stop_timeout)
@@ -115,9 +115,9 @@ class MavlinkMessageRouter:
             return self._sequence
 
     @property
-    def stats(self) -> MavlinkRouterStats:
+    def stats(self) -> MavRouterStats:
         with self._condition:
-            return MavlinkRouterStats(
+            return MavRouterStats(
                 running=self._running,
                 sequence=self._sequence,
                 received_messages=self._received_messages,
@@ -145,7 +145,7 @@ class MavlinkMessageRouter:
                 self._started_monotonic = time.monotonic()
             self._thread = threading.Thread(
                 target=self._read_loop,
-                name="MavlinkRouter",
+                name="MavRouter",
                 daemon=True,
             )
             self._thread.start()
@@ -179,7 +179,7 @@ class MavlinkMessageRouter:
     def subscribe(
         self,
         callback: Callable[[Any], None],
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
     ) -> Subscription:
         """Bind a callback with type, source, component, ID and condition filters."""
         if not callable(callback):
@@ -210,7 +210,7 @@ class MavlinkMessageRouter:
 
     def latest(
         self,
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
     ) -> Any | None:
         normalized_filter = coerce_message_filter(message_filter)
         with self._condition:
@@ -222,10 +222,10 @@ class MavlinkMessageRouter:
 
     def history(
         self,
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
         *,
         limit: int | None = None,
-    ) -> tuple[MavlinkMessageEnvelope, ...]:
+    ) -> tuple[MavMessageEnvelope, ...]:
         if limit is not None and limit <= 0:
             raise ValueError("history limit pozitif olmalı")
         normalized_filter = coerce_message_filter(message_filter)
@@ -238,7 +238,7 @@ class MavlinkMessageRouter:
 
     def wait_for(
         self,
-        message_types: MavlinkMessageFilter | MessageTypeInput,
+        message_types: MavMessageFilter | MessageTypeInput,
         *,
         predicate: MessagePredicate | None = None,
         timeout: float = 3.0,
@@ -289,7 +289,7 @@ class MavlinkMessageRouter:
                         return
                     with self._condition:
                         self._receive_errors += 1
-                    self._publish_error(MavlinkRouterError("receive", exc))
+                    self._publish_error(MavRouterError("receive", exc))
                     if self._stop_event.wait(self._error_backoff):
                         return
                     continue
@@ -297,7 +297,7 @@ class MavlinkMessageRouter:
                     continue
                 with self._condition:
                     self._sequence += 1
-                    envelope = MavlinkMessageEnvelope.wrap(self._sequence, message)
+                    envelope = MavMessageEnvelope.wrap(self._sequence, message)
                     self._history.append(envelope)
                     self._received_messages += 1
                     self._record_delivery(envelope)
@@ -310,7 +310,7 @@ class MavlinkMessageRouter:
                 self._running = False
                 self._condition.notify_all()
 
-    def _record_delivery(self, envelope: MavlinkMessageEnvelope) -> None:
+    def _record_delivery(self, envelope: MavMessageEnvelope) -> None:
         source_system = envelope.source_system
         source_component = envelope.source_component
         sequence = self._message_sequence(envelope.message)
@@ -352,7 +352,7 @@ class MavlinkMessageRouter:
         except (TypeError, ValueError):
             return None
 
-    def _dispatch(self, envelope: MavlinkMessageEnvelope) -> None:
+    def _dispatch(self, envelope: MavMessageEnvelope) -> None:
         compatibility_errors = (
             *self.envelopes.publish(envelope).errors,
             *self.messages.publish(envelope.message).errors,
@@ -386,8 +386,8 @@ class MavlinkMessageRouter:
 
     def _matches(
         self,
-        message_filter: MavlinkMessageFilter,
-        envelope: MavlinkMessageEnvelope,
+        message_filter: MavMessageFilter,
+        envelope: MavMessageEnvelope,
     ) -> bool:
         try:
             return message_filter.matches(
@@ -402,11 +402,11 @@ class MavlinkMessageRouter:
     def _record_dispatch_error(
         self,
         error: Exception,
-        envelope: MavlinkMessageEnvelope,
+        envelope: MavMessageEnvelope,
     ) -> None:
         with self._condition:
             self._dispatch_errors += 1
-        self._publish_error(MavlinkRouterError("dispatch", error, envelope))
+        self._publish_error(MavRouterError("dispatch", error, envelope))
 
-    def _publish_error(self, error: MavlinkRouterError) -> None:
+    def _publish_error(self, error: MavRouterError) -> None:
         self.errors.publish(error)

@@ -10,45 +10,45 @@ from typing import Any
 from eventflow import EventBus, Subscription
 
 from ._compatibility import ExceptionGroup
-from .application import MavlinkApplicationChannel, MavlinkApplicationPacket
-from .client import MavlinkClient
+from .application import MavApplicationChannel, MavApplicationPacket
+from .client import MavClient
 from .dispatch import (
-    MavlinkApplicationDispatcher,
-    MavlinkApplicationHandler,
+    MavApplicationDispatcher,
+    MavApplicationHandler,
 )
-from .endpoint import MavlinkEndpoint
-from .filter import MavlinkMessageFilter, MessagePredicate, MessageTypeInput
-from .peer import MavlinkApplicationPeer, MavlinkApplicationResponse
-from .router import MavlinkRouterStats
+from .endpoint import MavEndpoint
+from .filter import MavMessageFilter, MessagePredicate, MessageTypeInput
+from .peer import MavApplicationPeer, MavApplicationResponse
+from .router import MavRouterStats
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkRuntimeError:
+class MavRuntimeError:
     source: str
     error: Exception
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkRuntimeState:
+class MavRuntimeState:
     running: bool
     connected: bool
     application_enabled: bool
     peer_alive: bool
-    router: MavlinkRouterStats
+    router: MavRouterStats
 
 
-class MavlinkRuntime:
+class MavRuntime:
     """Offer one lifecycle and a small API for telemetry and application data."""
 
     def __init__(
         self,
-        endpoint: MavlinkEndpoint | None = None,
+        endpoint: MavEndpoint | None = None,
         *,
-        client: MavlinkClient | None = None,
+        client: MavClient | None = None,
         application_role: str | None = None,
-        channel: MavlinkApplicationChannel | None = None,
-        peer: MavlinkApplicationPeer | None = None,
-        dispatcher: MavlinkApplicationDispatcher | None = None,
+        channel: MavApplicationChannel | None = None,
+        peer: MavApplicationPeer | None = None,
+        dispatcher: MavApplicationDispatcher | None = None,
         workers: int = 1,
         max_pending: int = 64,
         channel_options: Mapping[str, Any] | None = None,
@@ -56,7 +56,7 @@ class MavlinkRuntime:
     ) -> None:
         if client is not None and endpoint is not None and client.endpoint != endpoint:
             raise ValueError("MAVLink runtime endpoint and client endpoint do not match")
-        self.client = client or MavlinkClient(endpoint or MavlinkEndpoint())
+        self.client = client or MavClient(endpoint or MavEndpoint())
         self.connection = self.client.connection
         self.router = self.client.router
 
@@ -67,11 +67,11 @@ class MavlinkRuntime:
             raise ValueError("A custom dispatcher requires an application peer")
 
         if peer is None and role:
-            channel = channel or MavlinkApplicationChannel(
+            channel = channel or MavApplicationChannel(
                 self.client,
                 **dict(channel_options or {}),
             )
-            peer = MavlinkApplicationPeer(
+            peer = MavApplicationPeer(
                 channel,
                 role=role,
                 target_system=lambda: self.connection.target_system,
@@ -82,7 +82,7 @@ class MavlinkRuntime:
         self.channel = channel
         self.peer = peer
         self.dispatcher = dispatcher or (
-            MavlinkApplicationDispatcher(
+            MavApplicationDispatcher(
                 peer,
                 workers=workers,
                 max_pending=max_pending,
@@ -91,7 +91,7 @@ class MavlinkRuntime:
             else None
         )
 
-        self.errors = EventBus[MavlinkRuntimeError](history=100)
+        self.errors = EventBus[MavRuntimeError](history=100)
         self._error_subscriptions: list[Subscription] = []
         self._running = False
         self._cleanup_pending = False
@@ -113,14 +113,14 @@ class MavlinkRuntime:
         return self.router.messages
 
     @property
-    def packets(self) -> EventBus[MavlinkApplicationPacket]:
+    def packets(self) -> EventBus[MavApplicationPacket]:
         if self.peer is None:
             raise RuntimeError("MAVLink application channel is not configured")
         return self.peer.packets
 
     @property
-    def state(self) -> MavlinkRuntimeState:
-        return MavlinkRuntimeState(
+    def state(self) -> MavRuntimeState:
+        return MavRuntimeState(
             running=self.running,
             connected=self.client.is_connected,
             application_enabled=self.application_enabled,
@@ -216,28 +216,28 @@ class MavlinkRuntime:
 
     def subscribe(
         self,
-        message_types: MavlinkMessageFilter | MessageTypeInput,
+        message_types: MavMessageFilter | MessageTypeInput,
         callback: Callable[[Any], None],
         *,
         predicate: MessagePredicate | None = None,
     ) -> Subscription:
         message_filter = (
             message_types
-            if isinstance(message_types, MavlinkMessageFilter)
-            else MavlinkMessageFilter(
+            if isinstance(message_types, MavMessageFilter)
+            else MavMessageFilter(
                 message_types=message_types,
                 predicate=predicate,
             )
         )
-        if isinstance(message_types, MavlinkMessageFilter) and predicate is not None:
-            raise ValueError("Use a MavlinkMessageFilter or predicate, not both")
+        if isinstance(message_types, MavMessageFilter) and predicate is not None:
+            raise ValueError("Use a MavMessageFilter or predicate, not both")
         return self.client.subscribe(callback, message_filter)
 
     on = subscribe
 
     def once(
         self,
-        message_types: MavlinkMessageFilter | MessageTypeInput,
+        message_types: MavMessageFilter | MessageTypeInput,
         callback: Callable[[Any], None],
         *,
         predicate: MessagePredicate | None = None,
@@ -271,7 +271,7 @@ class MavlinkRuntime:
 
     def wait_for(
         self,
-        message_types: MavlinkMessageFilter | MessageTypeInput,
+        message_types: MavMessageFilter | MessageTypeInput,
         *,
         predicate: MessagePredicate | None = None,
         timeout: float = 3.0,
@@ -286,7 +286,7 @@ class MavlinkRuntime:
 
     def latest(
         self,
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
     ) -> Any | None:
         return self.client.latest(message_filter)
 
@@ -299,7 +299,7 @@ class MavlinkRuntime:
     def handle(
         self,
         packet_type: str,
-        handler: MavlinkApplicationHandler,
+        handler: MavApplicationHandler,
         *,
         replace: bool = False,
     ) -> Subscription:
@@ -311,7 +311,7 @@ class MavlinkRuntime:
         self,
         packet_type: str,
         payload: Mapping[str, Any] | None = None,
-    ) -> MavlinkApplicationPacket:
+    ) -> MavApplicationPacket:
         if self.peer is None:
             raise RuntimeError("MAVLink application peer is not configured")
         return self.peer.send(packet_type, payload)
@@ -326,7 +326,7 @@ class MavlinkRuntime:
             "system.error",
         ),
         timeout: float = 3.0,
-    ) -> MavlinkApplicationResponse:
+    ) -> MavApplicationResponse:
         if self.peer is None:
             raise RuntimeError("MAVLink application peer is not configured")
         return self.peer.request(
@@ -355,9 +355,9 @@ class MavlinkRuntime:
         if not isinstance(error, Exception):
             error = getattr(error, "error", RuntimeError(str(error)))
         if not self.errors.closed:
-            self.errors.publish(MavlinkRuntimeError(source, error))
+            self.errors.publish(MavRuntimeError(source, error))
 
-    def __enter__(self) -> MavlinkRuntime:
+    def __enter__(self) -> MavRuntime:
         self.start()
         return self
 

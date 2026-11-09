@@ -13,7 +13,7 @@ from .filter import (
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkMessageEnvelope:
+class MavMessageEnvelope:
     """Once-extracted routing metadata and the raw pymavlink message."""
 
     sequence: int
@@ -25,7 +25,7 @@ class MavlinkMessageEnvelope:
     received_monotonic: float
 
     @classmethod
-    def wrap(cls, sequence: int, message: Any) -> MavlinkMessageEnvelope:
+    def wrap(cls, sequence: int, message: Any) -> MavMessageEnvelope:
         return cls(
             sequence=sequence,
             message=message,

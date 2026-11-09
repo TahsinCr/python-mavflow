@@ -27,6 +27,7 @@ application-specific behavior belong to the projects built on top of it.
   - [Install](#install)
   - [Version](#version)
   - [Receive your first heartbeat](#first-heartbeat)
+  - [Run an example](#run-an-example)
   - [Choose an API layer](#choose-api-layer)
 - [Core concepts](#core-concepts)
   - [Endpoints and connections](#endpoints)
@@ -42,6 +43,7 @@ application-specific behavior belong to the projects built on top of it.
   - [Encode and reassemble packets](#codec)
   - [Peers, requests, and handlers](#peers-and-requests)
   - [Remote log models](#remote-logs)
+- [Troubleshooting](#troubleshooting)
 - [Security and operational boundaries](#operational-boundaries)
 - [Composing the stack](#composition)
 - [Lifecycle and reference](#reference)
@@ -85,7 +87,8 @@ The `dev` extra provides build, coverage, pyperf, Pyright, Ruff, and Twine.
 <a id="version"></a>
 ### Version
 
-The installed package exposes its version as `mavflow.__version__`:
+The current package line is **v1.0.0**. The project metadata and installed
+package expose the same version through `mavflow.__version__`:
 
 ~~~python
 from mavflow import __version__
@@ -96,45 +99,84 @@ print(__version__)  # 1.0.0
 <a id="first-heartbeat"></a>
 ### Receive your first heartbeat
 
-This example listens on UDP port 14550, waits for a heartbeat, and then
-observes subsequent heartbeat messages. A vehicle or simulator must send
-MAVLink packets to the configured endpoint.
+This async example listens on UDP port 14550 and awaits a heartbeat through
+`MavAsyncChannel`. The runtime owns the connection lifecycle; the channel
+forwards routed messages into the asyncio event loop. A vehicle or simulator
+must send MAVLink packets to the configured endpoint.
 
 ~~~python
-from mavflow import MavlinkEndpoint, MavlinkRuntime
+import asyncio
+
+from mavflow import MavAsyncChannel, MavEndpoint, MavRuntime
 
 
-def show_heartbeat(message: object) -> None:
-    print(message)
-
-
-endpoint = MavlinkEndpoint.udp("0.0.0.0", 14550)
-with MavlinkRuntime(endpoint) as link:
-    subscription = link.subscribe("HEARTBEAT", show_heartbeat)
+async def main() -> None:
+    runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+    channel = MavAsyncChannel(runtime.router, "HEARTBEAT", maxsize=64)
+    channel.start()
     try:
-        first = link.wait_for("HEARTBEAT", timeout=10.0)
-        print("First heartbeat:", first)
+        runtime.start()
+        try:
+            message = await channel.receive(timeout=10.0)
+        except asyncio.TimeoutError:
+            print("No heartbeat received before the timeout")
+        else:
+            print("First heartbeat:", message)
     finally:
-        subscription.cancel()
+        channel.stop()
+        runtime.stop()
+
+
+asyncio.run(main())
 ~~~
 
-The runtime starts the connection and router when the context is entered, then
-stops them when it exits. `wait_for()` returns the first matching message or
-`None` when the timeout expires. See
-[examples/telemetry.py](examples/telemetry.py) for a command-line version.
+For a synchronous application, use the runtime context manager and `wait_for()`
+directly:
+
+~~~python
+from mavflow import MavEndpoint, MavRuntime
+
+with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as link:
+    message = link.wait_for("HEARTBEAT", timeout=10.0)
+    if message is not None:
+        print("First heartbeat:", message)
+~~~
+
+The synchronous and async examples are also available as runnable modules.
+
+<a id="run-an-example"></a>
+### Run an example
+
+Install Mavflow first, then run these commands from the repository root. Each
+telemetry example expects a vehicle, simulator, or MAVLink router to send data
+to the selected endpoint.
+
+~~~bash
+python -m examples.telemetry_async --host 0.0.0.0 --port 14550 --timeout 10
+python -m examples.telemetry --host 0.0.0.0 --port 14550 --timeout 10
+python -m examples.filtered_telemetry --system 1 --seconds 30
+python -m examples.message_history --message-type HEARTBEAT --limit 20
+python -m examples.application_packets
+~~~
+
+`telemetry_async` demonstrates asyncio consumption, while `telemetry` shows the
+synchronous runtime. `filtered_telemetry` selects position and attitude
+messages from one source system; `message_history` waits for a message and
+prints the router's retained history and counters. `application_packets`
+demonstrates packet encoding and reassembly without opening a vehicle link.
 
 <a id="choose-api-layer"></a>
 ### Choose an API layer
 
 | Component | Use it for |
 | --- | --- |
-| `MavlinkConnection` | Opening a `pymavlink` transport and sending or receiving raw MAVLink messages. |
-| `MavlinkMessageRouter` | Owning the receive loop, filtering messages, and keeping bounded message history. |
-| `MavlinkClient` | Using a connection and router through one synchronous facade. |
-| `MavlinkRuntime` | Owning the client lifecycle and optionally composing application peers and handlers. |
-| `MavlinkAsyncChannel` | Delivering routed messages to an asyncio event loop through a bounded queue. |
+| `MavConnection` | Opening a `pymavlink` transport and sending or receiving raw MAVLink messages. |
+| `MavMessageRouter` | Owning the receive loop, filtering messages, and keeping bounded message history. |
+| `MavClient` | Using a connection and router through one synchronous facade. |
+| `MavRuntime` | Owning the client lifecycle and optionally composing application peers and handlers. |
+| `MavAsyncChannel` | Delivering routed messages to an asyncio event loop through a bounded queue. |
 
-Use `MavlinkRuntime` for the normal application entry point. Compose the lower
+Use `MavRuntime` for the normal application entry point. Compose the lower
 level types directly when an application needs to own a transport or router
 itself.
 
@@ -144,16 +186,16 @@ itself.
 <a id="endpoints"></a>
 ### Endpoints and connections
 
-`MavlinkEndpoint` is an immutable description of a connection. The helpers
+`MavEndpoint` is an immutable description of a connection. The helpers
 `tcp(host, port)`, `udp(host, port)`, and `serial(device, baud=...)` build
 common endpoint forms:
 
 ~~~python
-from mavflow import MavlinkEndpoint
+from mavflow import MavEndpoint
 
-udp = MavlinkEndpoint.udp("0.0.0.0", 14550)
-tcp = MavlinkEndpoint.tcp("192.0.2.10", 5760)
-serial = MavlinkEndpoint.serial("/dev/ttyUSB0", baud=57600)
+udp = MavEndpoint.udp("0.0.0.0", 14550)
+tcp = MavEndpoint.tcp("192.0.2.10", 5760)
+serial = MavEndpoint.serial("/dev/ttyUSB0", baud=57600)
 ~~~
 
 An endpoint also carries the local system and component IDs, MAVLink dialect,
@@ -161,7 +203,7 @@ reconnect setting, and heartbeat timeout. Its default URI is
 `udp:127.0.0.1:14550`. Use the address and transport mode expected by the
 vehicle, radio, simulator, or router.
 
-`MavlinkConnection` owns the underlying `pymavlink` connection. Importing
+`MavConnection` owns the underlying `pymavlink` connection. Importing
 `mavflow` does not open a device or load the transport module; `pymavlink` is
 loaded when a real connection is created. The connection provides lifecycle
 methods, raw message access, send helpers, and vehicle target information.
@@ -169,7 +211,7 @@ methods, raw message access, send helpers, and vehicle target information.
 <a id="router"></a>
 ### One reader and the message router
 
-`MavlinkMessageRouter` owns the receive loop for a connection. It reads each
+`MavMessageRouter` owns the receive loop for a connection. It reads each
 incoming message once, records the message and sequence state, then delivers
 matching messages to active subscriptions.
 
@@ -179,20 +221,20 @@ blocking work to an application-owned worker instead of holding up the receive
 loop.
 
 The router exposes current statistics, the latest matching message, a bounded
-history, and a wait operation. `MavlinkClient` combines one connection and one
+history, and a wait operation. `MavClient` combines one connection and one
 router so callers do not have to wire those pieces together manually.
 
 <a id="filtering"></a>
 ### Filtering and message history
 
-`MavlinkMessageFilter` can match message types, source system IDs, source
+`MavMessageFilter` can match message types, source system IDs, source
 component IDs, message IDs, a message condition, or a predicate. Combine
 criteria when a callback should receive only a subset of the telemetry:
 
 ~~~python
-from mavflow import MavlinkMessageFilter
+from mavflow import MavMessageFilter
 
-position_filter = MavlinkMessageFilter.for_types(
+position_filter = MavMessageFilter.for_types(
     "GLOBAL_POSITION_INT",
     source_systems=1,
 )
@@ -207,14 +249,14 @@ bounded; it is not a durable telemetry log.
 <a id="lifecycle"></a>
 ### Lifecycle and composition
 
-`MavlinkRuntime` composes a client and, when requested, an application channel,
+`MavRuntime` composes a client and, when requested, an application channel,
 peer, and dispatcher. `start()` starts the transport and owned application
 services in dependency order. `stop()` shuts them down in reverse order and
 collects shutdown errors. A runtime can be used as a synchronous context
 manager, as in the first example.
 
 Create separate runtimes for separate connections. A runtime can also accept
-an existing `MavlinkClient` when an application needs to share or configure
+an existing `MavClient` when an application needs to share or configure
 the lower-level connection and router.
 
 <a id="event-delivery"></a>
@@ -234,23 +276,23 @@ manage them with the surrounding service lifetime.
 <a id="subscribe"></a>
 ### Subscribe to messages
 
-`MavlinkRuntime.subscribe()` accepts a message type or a filter and a callback.
+`MavRuntime.subscribe()` accepts a message type or a filter and a callback.
 The returned subscription can be cancelled independently of the runtime:
 
 ~~~python
-from mavflow import MavlinkEndpoint, MavlinkMessageFilter, MavlinkRuntime
+from mavflow import MavEndpoint, MavMessageFilter, MavRuntime
 
 
 def report_position(message: object) -> None:
     print(message)
 
 
-position_filter = MavlinkMessageFilter.for_types(
+position_filter = MavMessageFilter.for_types(
     "GLOBAL_POSITION_INT",
     source_systems=1,
 )
 
-with MavlinkRuntime(MavlinkEndpoint.udp("0.0.0.0", 14550)) as link:
+with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as link:
     position_subscription = link.subscribe(position_filter, report_position)
     heartbeat_subscription = link.subscribe("HEARTBEAT", print)
     try:
@@ -273,9 +315,9 @@ for the most recent match already observed, or `history()` to inspect retained
 messages:
 
 ~~~python
-from mavflow import MavlinkEndpoint, MavlinkRuntime
+from mavflow import MavEndpoint, MavRuntime
 
-with MavlinkRuntime(MavlinkEndpoint.udp("0.0.0.0", 14550)) as link:
+with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as link:
     first_heartbeat = link.wait_for("HEARTBEAT", timeout=10.0)
     most_recent = link.latest("HEARTBEAT")
     recent_messages = link.router.history("HEARTBEAT", limit=20)
@@ -295,22 +337,23 @@ client or runtime. The method name and arguments follow the generated
 ## Async applications
 
 MAVLink transport reads remain owned by the synchronous router. Use
-`MavlinkAsyncChannel` to forward selected messages into an asyncio event loop.
-The channel has a bounded queue; when it fills, it drops the oldest queued
-message and increments `dropped_messages`.
+`MavAsyncChannel` to forward selected messages into an asyncio event loop;
+this is a bounded bridge, not a second transport reader. When the queue fills,
+the channel drops the oldest queued message and increments `dropped_messages`.
 
 Start the channel from inside its running event loop. Stop it before stopping
-the runtime so it can cancel its router subscription cleanly:
+the runtime so it can cancel its router subscription cleanly. This example
+consumes a continuous stream and can be cancelled with the surrounding task:
 
 ~~~python
 import asyncio
 
-from mavflow import MavlinkAsyncChannel, MavlinkEndpoint, MavlinkRuntime
+from mavflow import MavAsyncChannel, MavEndpoint, MavRuntime
 
 
 async def main() -> None:
-    runtime = MavlinkRuntime(MavlinkEndpoint.udp("0.0.0.0", 14550))
-    channel = MavlinkAsyncChannel(
+    runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+    channel = MavAsyncChannel(
         runtime.router,
         "HEARTBEAT",
         maxsize=64,
@@ -318,8 +361,9 @@ async def main() -> None:
     channel.start()
     try:
         runtime.start()
-        message = await channel.receive(timeout=10.0)
-        print(message)
+        while True:
+            message = await channel.receive()
+            print(message)
     finally:
         channel.stop()
         runtime.stop()
@@ -328,10 +372,12 @@ async def main() -> None:
 asyncio.run(main())
 ~~~
 
-`receive(timeout=...)` raises a timeout exception when no message arrives
-before the deadline. `receive_nowait()` reads an already queued message and
-raises `asyncio.QueueEmpty` when the queue is empty. The channel exposes its
-pending count and drop count so applications can monitor bounded delivery.
+`receive(timeout=...)` raises `asyncio.TimeoutError` when no message arrives
+before the deadline. `receive_nowait()` reads an already queued message and raises
+`asyncio.QueueEmpty` when the queue is empty. The channel exposes its pending
+count and drop count so applications can monitor bounded delivery. For a CLI
+version with argument parsing and cleanup, see
+[examples/telemetry_async.py](examples/telemetry_async.py).
 
 <a id="application-packets"></a>
 ## Application packets
@@ -344,29 +390,29 @@ enable it.
 <a id="codec"></a>
 ### Encode and reassemble packets
 
-`MavlinkApplicationPacket` stores a packet type, JSON-compatible payload,
-packet ID, timestamp, source IDs, and response flag. `MavlinkApplicationCodec`
+`MavApplicationPacket` stores a packet type, JSON-compatible payload,
+packet ID, timestamp, source IDs, and response flag. `MavApplicationCodec`
 encodes a packet into bounded fragments, adds a checksum, and validates
-fragments during decode. `MavlinkApplicationAssembler` reassembles fragments
+fragments during decode. `MavApplicationAssembler` reassembles fragments
 while bounding incomplete packet count, memory, and lifetime.
 
 The codec can be used without opening a vehicle connection:
 
 ~~~python
 from mavflow import (
-    MavlinkApplicationAssembler,
-    MavlinkApplicationCodec,
-    MavlinkApplicationPacket,
+    MavApplicationAssembler,
+    MavApplicationCodec,
+    MavApplicationPacket,
 )
 
-packet = MavlinkApplicationPacket(
+packet = MavApplicationPacket(
     "vehicle.health",
     {"ready": True, "battery_percent": 84},
     packet_id=42,
 )
-fragments = MavlinkApplicationCodec.encode(packet)
+fragments = MavApplicationCodec.encode(packet)
 
-assembler = MavlinkApplicationAssembler()
+assembler = MavApplicationAssembler()
 decoded = None
 for fragment in fragments:
     decoded = assembler.accept(fragment, source_system=1, source_component=1)
@@ -388,15 +434,15 @@ Set `application_role` when constructing a runtime to enable the application
 channel, peer, and dispatcher:
 
 ~~~python
-from mavflow import MavlinkEndpoint, MavlinkRuntime
+from mavflow import MavEndpoint, MavRuntime
 
 
 def read_health(_request: object) -> dict[str, object]:
     return {"ready": True, "battery_percent": 84}
 
 
-endpoint = MavlinkEndpoint.udp("0.0.0.0", 14550)
-runtime = MavlinkRuntime(endpoint, application_role="vehicle")
+endpoint = MavEndpoint.udp("0.0.0.0", 14550)
+runtime = MavRuntime(endpoint, application_role="vehicle")
 handler = runtime.handle("vehicle.health.query", read_health)
 
 try:
@@ -407,8 +453,8 @@ finally:
     handler.cancel()
 ~~~
 
-A handler receives a `MavlinkApplicationPacket`. It can return a mapping, a
-`MavlinkApplicationResult`, or `None`. If the request expects a response,
+A handler receives a `MavApplicationPacket`. It can return a mapping, a
+`MavApplicationResult`, or `None`. If the request expects a response,
 Mavflow sends the handler result to the requesting peer. Handler registration
 returns a cancellable subscription.
 
@@ -417,7 +463,7 @@ needs a correlated response. Requests carry an ID, accept response type filters,
 and raise `TimeoutError` when no matching response arrives before the deadline:
 
 ~~~python
-with MavlinkRuntime(endpoint, application_role="ground-station") as link:
+with MavRuntime(endpoint, application_role="ground-station") as link:
     response = link.request(
         "vehicle.health.query",
         {},
@@ -434,10 +480,24 @@ and dispatcher capacity for the timing and workload of the application.
 <a id="remote-logs"></a>
 ### Remote log models
 
-`MavlinkRemoteLogRecord` and `MavlinkRemoteLogBatch` describe application log
+`MavRemoteLogRecord` and `MavRemoteLogBatch` describe application log
 records that can be converted to and from protocol payloads. They provide
 validated record and batch models; they do not configure a Python logging
 handler or persist logs locally.
+
+<a id="troubleshooting"></a>
+## Troubleshooting
+
+| Symptom | Checks |
+| --- | --- |
+| `wait_for()` returns `None` or an async receive times out. | Confirm the sender targets the configured UDP/TCP endpoint, the vehicle or simulator is transmitting, and the requested message type is present. Increase the timeout only when the link needs more time to start. |
+| `MavAsyncChannel.start()` raises that no loop is running. | Create and start the channel from inside an active `async def` function, then start the runtime. |
+| `dropped_messages` keeps increasing. | The bounded queue is receiving faster than the consumer processes messages. Reduce the filter to needed message types, speed up the consumer, or increase `maxsize` if memory permits. |
+| An application `request()` times out. | Check that the remote peer is running, the packet type and response type match the registered handler, and the selected system/component IDs route to that peer. |
+
+The synchronous runtime uses `None` for a wait timeout. Async channel receives
+raise `asyncio.TimeoutError`; application requests raise `TimeoutError`. Handle
+these separately when one task uses more than one API layer.
 
 <a id="operational-boundaries"></a>
 ## Security and operational boundaries
@@ -459,8 +519,8 @@ command policy, and validation of business-level payloads.
 <a id="composition"></a>
 ## Composing the stack
 
-The core telemetry path is `MavlinkEndpoint` → `MavlinkConnection` →
-`MavlinkMessageRouter` → `MavlinkClient` → `MavlinkRuntime`. Each layer has
+The core telemetry path is `MavEndpoint` → `MavConnection` →
+`MavMessageRouter` → `MavClient` → `MavRuntime`. Each layer has
 one job: describe the address, own the transport, own the receive loop,
 provide a synchronous facade, and coordinate application lifecycle.
 
@@ -468,11 +528,11 @@ An application role adds the packet channel, peer state, and bounded
 dispatcher on top of that same client and router:
 
 ~~~python
-from mavflow import MavlinkClient, MavlinkEndpoint, MavlinkRuntime
+from mavflow import MavClient, MavEndpoint, MavRuntime
 
-endpoint = MavlinkEndpoint.udp("0.0.0.0", 14550)
-client = MavlinkClient(endpoint)
-runtime = MavlinkRuntime(
+endpoint = MavEndpoint.udp("0.0.0.0", 14550)
+client = MavClient(endpoint)
+runtime = MavRuntime(
     client=client,
     application_role="ground-station",
     workers=2,
@@ -508,15 +568,15 @@ when an application needs an independent transport or lifecycle.
 
 | Component | Responsibility |
 | --- | --- |
-| `MavlinkEndpoint` | Normalize a TCP, UDP, or serial connection description. |
-| `MavlinkConnection` | Own the `pymavlink` transport, lifecycle, and raw send/receive operations. |
-| `MavlinkMessageRouter` | Own one receive loop, filter callbacks, sequence state, and bounded history. |
-| `MavlinkClient` | Compose a connection and router behind a synchronous facade. |
-| `MavlinkRuntime` | Start and stop the client and optional application services as one unit. |
-| `MavlinkAsyncChannel` | Bridge filtered router delivery into a bounded asyncio queue. |
-| `MavlinkApplicationChannel` | Carry application fragments over MAVLink `V2_EXTENSION`. |
-| `MavlinkApplicationPeer` | Send notifications and correlated requests and track peer liveness. |
-| `MavlinkApplicationDispatcher` | Run registered packet handlers with bounded worker capacity. |
+| `MavEndpoint` | Normalize a TCP, UDP, or serial connection description. |
+| `MavConnection` | Own the `pymavlink` transport, lifecycle, and raw send/receive operations. |
+| `MavMessageRouter` | Own one receive loop, filter callbacks, sequence state, and bounded history. |
+| `MavClient` | Compose a connection and router behind a synchronous facade. |
+| `MavRuntime` | Start and stop the client and optional application services as one unit. |
+| `MavAsyncChannel` | Bridge filtered router delivery into a bounded asyncio queue. |
+| `MavApplicationChannel` | Carry application fragments over MAVLink `V2_EXTENSION`. |
+| `MavApplicationPeer` | Send notifications and correlated requests and track peer liveness. |
+| `MavApplicationDispatcher` | Run registered packet handlers with bounded worker capacity. |
 
 ### Runtime methods
 
@@ -538,16 +598,16 @@ The package exports these public names:
 
 | Area | Public names |
 | --- | --- |
-| Transport and routing | `MavlinkEndpoint`, `MavlinkConnection`, `MavlinkMessageRouter`, `MavlinkMessageFilter`, `MavlinkMessageEnvelope`, `MavlinkHeader`, `MavlinkMessage`, `MavlinkRouterStats`, `MessageCache` |
-| Runtime and async | `MavlinkClient`, `MavlinkRuntime`, `MavlinkRuntimeState`, `MavlinkAsyncChannel` |
-| Application protocol | `MavlinkApplicationPacket`, `MavlinkApplicationCodec`, `MavlinkApplicationAssembler`, `MavlinkApplicationChannel`, `MavlinkApplicationPeer`, `MavlinkApplicationDispatcher`, `MavlinkApplicationHandlerRegistry`, `MavlinkApplicationResult`, `MavlinkApplicationResponse` |
-| Remote logs | `MavlinkRemoteLogLevel`, `MavlinkRemoteLogRecord`, `MavlinkRemoteLogBatch` |
+| Transport and routing | `MavEndpoint`, `MavConnection`, `MavMessageRouter`, `MavMessageFilter`, `MavMessageEnvelope`, `MavHeader`, `MavMessage`, `MavRouterStats`, `MessageCache` |
+| Runtime and async | `MavClient`, `MavRuntime`, `MavRuntimeState`, `MavAsyncChannel` |
+| Application protocol | `MavApplicationPacket`, `MavApplicationCodec`, `MavApplicationAssembler`, `MavApplicationChannel`, `MavApplicationPeer`, `MavApplicationDispatcher`, `MavApplicationHandlerRegistry`, `MavApplicationResult`, `MavApplicationResponse` |
+| Remote logs | `MavRemoteLogLevel`, `MavRemoteLogRecord`, `MavRemoteLogBatch` |
 
-`MavlinkHeader` and `MavlinkMessage` are defined in `mavflow.contracts` and
+`MavHeader` and `MavMessage` are defined in `mavflow.contracts` and
 re-exported from `mavflow`.
 
-Key error types include `MavlinkUnavailableError`, `MavlinkRouterError`,
-`MavlinkRuntimeError`, and `MavlinkApplicationProtocolError`. Import the
+Key error types include `MavUnavailableError`, `MavRouterError`,
+`MavRuntimeError`, and `MavApplicationProtocolError`. Import the
 specific error classes from `mavflow` when an application needs to handle them.
 
 <a id="development"></a>

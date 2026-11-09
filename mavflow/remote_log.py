@@ -21,7 +21,7 @@ REMOTE_LOG_MAX_DETAILS_BYTES = 3_000
 _SESSION_ID_PATTERN = re.compile(r"^[A-Za-z0-9_.:-]{4,96}$")
 
 
-class MavlinkRemoteLogLevel(StrEnum):
+class MavRemoteLogLevel(StrEnum):
     DEBUG = "debug"
     INFO = "info"
     SUCCESS = "success"
@@ -32,24 +32,24 @@ class MavlinkRemoteLogLevel(StrEnum):
     @property
     def priority(self) -> int:
         return {
-            MavlinkRemoteLogLevel.DEBUG: 10,
-            MavlinkRemoteLogLevel.INFO: 20,
-            MavlinkRemoteLogLevel.SUCCESS: 25,
-            MavlinkRemoteLogLevel.WARNING: 30,
-            MavlinkRemoteLogLevel.ERROR: 40,
-            MavlinkRemoteLogLevel.CRITICAL: 50,
+            MavRemoteLogLevel.DEBUG: 10,
+            MavRemoteLogLevel.INFO: 20,
+            MavRemoteLogLevel.SUCCESS: 25,
+            MavRemoteLogLevel.WARNING: 30,
+            MavRemoteLogLevel.ERROR: 40,
+            MavRemoteLogLevel.CRITICAL: 50,
         }[self]
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkRemoteLogRecord:
+class MavRemoteLogRecord:
     """One transport-safe structured log emitted by an onboard application."""
 
     sequence: int
     source: str
     action: str
     message: str
-    level: MavlinkRemoteLogLevel = MavlinkRemoteLogLevel.INFO
+    level: MavRemoteLogLevel = MavRemoteLogLevel.INFO
     emitted_at: float = field(default_factory=time.time)
     details: Mapping[str, Any] = field(default_factory=dict)
     device_id: str | None = None
@@ -61,14 +61,14 @@ class MavlinkRemoteLogRecord:
         if isinstance(value, Mapping):
             return MappingProxyType(
                 {
-                    deepcopy(key): MavlinkRemoteLogRecord._freeze_details_value(item)
+                    deepcopy(key): MavRemoteLogRecord._freeze_details_value(item)
                     for key, item in value.items()
                 }
             )
         if isinstance(value, (tuple, list)):
-            return tuple(MavlinkRemoteLogRecord._freeze_details_value(item) for item in value)
+            return tuple(MavRemoteLogRecord._freeze_details_value(item) for item in value)
         if isinstance(value, (set, frozenset)):
-            return frozenset(MavlinkRemoteLogRecord._freeze_details_value(item) for item in value)
+            return frozenset(MavRemoteLogRecord._freeze_details_value(item) for item in value)
         return deepcopy(value)
 
     @staticmethod
@@ -76,15 +76,15 @@ class MavlinkRemoteLogRecord:
         """Return a detached mutable representation of a log details value."""
         if isinstance(value, Mapping):
             return {
-                deepcopy(key): MavlinkRemoteLogRecord._copy_details_value(item)
+                deepcopy(key): MavRemoteLogRecord._copy_details_value(item)
                 for key, item in value.items()
             }
         if isinstance(value, tuple):
-            return [MavlinkRemoteLogRecord._copy_details_value(item) for item in value]
+            return [MavRemoteLogRecord._copy_details_value(item) for item in value]
         if isinstance(value, list):
-            return [MavlinkRemoteLogRecord._copy_details_value(item) for item in value]
+            return [MavRemoteLogRecord._copy_details_value(item) for item in value]
         if isinstance(value, (set, frozenset)):
-            return {MavlinkRemoteLogRecord._copy_details_value(item) for item in value}
+            return {MavRemoteLogRecord._copy_details_value(item) for item in value}
         return deepcopy(value)
 
     def __post_init__(self) -> None:
@@ -123,7 +123,7 @@ class MavlinkRemoteLogRecord:
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "action", action)
         object.__setattr__(self, "message", message)
-        object.__setattr__(self, "level", MavlinkRemoteLogLevel(self.level))
+        object.__setattr__(self, "level", MavRemoteLogLevel(self.level))
         object.__setattr__(self, "emitted_at", emitted_at)
         object.__setattr__(self, "details", self._freeze_details_value(details))
         object.__setattr__(self, "device_id", device_id)
@@ -146,7 +146,7 @@ class MavlinkRemoteLogRecord:
         return payload
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> MavlinkRemoteLogRecord:
+    def from_payload(cls, payload: Mapping[str, Any]) -> MavRemoteLogRecord:
         if not isinstance(payload, Mapping):
             raise ValueError("Remote log record payload must be an object")
         details = payload.get("details", {})
@@ -157,7 +157,7 @@ class MavlinkRemoteLogRecord:
             source=str(payload.get("source", "")),
             action=str(payload.get("action", "")),
             message=str(payload.get("message", "")),
-            level=MavlinkRemoteLogLevel(str(payload.get("level", "info")).lower()),
+            level=MavRemoteLogLevel(str(payload.get("level", "info")).lower()),
             emitted_at=float(payload.get("at", 0.0)),
             details=dict(details),
             device_id=_payload_optional_text(payload.get("device_id")),
@@ -166,11 +166,11 @@ class MavlinkRemoteLogRecord:
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkRemoteLogBatch:
+class MavRemoteLogBatch:
     """An ordered log batch acknowledged as one application request."""
 
     session_id: str
-    records: tuple[MavlinkRemoteLogRecord, ...]
+    records: tuple[MavRemoteLogRecord, ...]
     created_at: float = field(default_factory=time.time)
 
     def __post_init__(self) -> None:
@@ -221,7 +221,7 @@ class MavlinkRemoteLogBatch:
         }
 
     @classmethod
-    def from_payload(cls, payload: Mapping[str, Any]) -> MavlinkRemoteLogBatch:
+    def from_payload(cls, payload: Mapping[str, Any]) -> MavRemoteLogBatch:
         if not isinstance(payload, Mapping):
             raise ValueError("Remote log batch payload must be an object")
         version = int(payload.get("version", 0))
@@ -232,7 +232,7 @@ class MavlinkRemoteLogBatch:
             raise ValueError("Remote log records must be a list")
         return cls(
             session_id=str(payload.get("session", "")),
-            records=tuple(MavlinkRemoteLogRecord.from_payload(value) for value in values),
+            records=tuple(MavRemoteLogRecord.from_payload(value) for value in values),
             created_at=float(payload.get("created_at", 0.0)),
         )
 
@@ -253,9 +253,9 @@ def _payload_optional_text(value: object) -> str | None:
 
 
 __all__ = [
-    "MavlinkRemoteLogBatch",
-    "MavlinkRemoteLogLevel",
-    "MavlinkRemoteLogRecord",
+    "MavRemoteLogBatch",
+    "MavRemoteLogLevel",
+    "MavRemoteLogRecord",
     "REMOTE_LOG_MAX_BATCH_BYTES",
     "REMOTE_LOG_MAX_BATCH_RECORDS",
     "REMOTE_LOG_MAX_DETAILS_BYTES",

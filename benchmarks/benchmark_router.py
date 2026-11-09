@@ -6,7 +6,7 @@ import queue
 import threading
 import time
 
-from mavflow import MavlinkMessageRouter
+from mavflow import MavMessageRouter
 
 from ._runner import create_runner, positive_integer
 
@@ -58,7 +58,7 @@ def _sample(messages_per_batch: int) -> float:
         messages.put(_Message(sequence))
     release = threading.Event()
     connection = _Connection(messages, release)
-    router = MavlinkMessageRouter(connection, poll_timeout=0.002, stop_timeout=2.0)  # type: ignore[arg-type]
+    router = MavMessageRouter(connection, poll_timeout=0.002, stop_timeout=2.0)  # type: ignore[arg-type]
     delivered = 0
     completed = threading.Event()
 

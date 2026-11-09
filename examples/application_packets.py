@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from mavflow import MavlinkApplicationAssembler, MavlinkApplicationCodec, MavlinkApplicationPacket
+from mavflow import MavApplicationAssembler, MavApplicationCodec, MavApplicationPacket
 
 
 def main() -> None:
-    packet = MavlinkApplicationPacket(
+    packet = MavApplicationPacket(
         "vehicle.health",
         {"ready": True, "battery_percent": 84, "note": "example"},
         packet_id=42,
     )
-    fragments = MavlinkApplicationCodec.encode(packet)
-    assembler = MavlinkApplicationAssembler()
+    fragments = MavApplicationCodec.encode(packet)
+    assembler = MavApplicationAssembler()
     decoded = None
     for fragment in fragments:
         decoded = assembler.accept(fragment, source_system=1, source_component=1)

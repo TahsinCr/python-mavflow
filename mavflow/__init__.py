@@ -5,31 +5,31 @@ __version__ = "1.0.0"
 from .application import (
     DEFAULT_APPLICATION_MESSAGE_TYPE,
     DEFAULT_APPLICATION_NETWORK,
-    MavlinkApplicationAssembler,
-    MavlinkApplicationChannel,
-    MavlinkApplicationCodec,
-    MavlinkApplicationPacket,
-    MavlinkApplicationProtocolError,
+    MavApplicationAssembler,
+    MavApplicationChannel,
+    MavApplicationCodec,
+    MavApplicationPacket,
+    MavApplicationProtocolError,
 )
 from .cache import MessageCache
-from .channel import MavlinkAsyncChannel
-from .client import MavlinkClient
-from .connection import MavlinkConnection, MavlinkUnavailableError
-from .contracts import MavlinkHeader, MavlinkMessage
+from .channel import MavAsyncChannel
+from .client import MavClient
+from .connection import MavConnection, MavUnavailableError
+from .contracts import MavHeader, MavMessage
 from .dispatch import (
-    MavlinkApplicationDispatch,
-    MavlinkApplicationDispatcher,
-    MavlinkApplicationHandler,
-    MavlinkApplicationHandlerRegistry,
-    MavlinkApplicationResult,
+    MavApplicationDispatch,
+    MavApplicationDispatcher,
+    MavApplicationHandler,
+    MavApplicationHandlerRegistry,
+    MavApplicationResult,
 )
-from .endpoint import MavlinkEndpoint
-from .filter import MavlinkMessageFilter
-from .message import MavlinkMessageEnvelope
+from .endpoint import MavEndpoint
+from .filter import MavMessageFilter
+from .message import MavMessageEnvelope
 from .peer import (
-    MavlinkApplicationPeer,
-    MavlinkApplicationPeerState,
-    MavlinkApplicationResponse,
+    MavApplicationPeer,
+    MavApplicationPeerState,
+    MavApplicationResponse,
 )
 from .remote_log import (
     REMOTE_LOG_MAX_BATCH_BYTES,
@@ -37,47 +37,47 @@ from .remote_log import (
     REMOTE_LOG_MAX_DETAILS_BYTES,
     REMOTE_LOG_PACKET_TYPE,
     REMOTE_LOG_PROTOCOL_VERSION,
-    MavlinkRemoteLogBatch,
-    MavlinkRemoteLogLevel,
-    MavlinkRemoteLogRecord,
+    MavRemoteLogBatch,
+    MavRemoteLogLevel,
+    MavRemoteLogRecord,
 )
-from .router import MavlinkMessageRouter, MavlinkRouterError, MavlinkRouterStats
-from .runtime import MavlinkRuntime, MavlinkRuntimeError, MavlinkRuntimeState
+from .router import MavMessageRouter, MavRouterError, MavRouterStats
+from .runtime import MavRuntime, MavRuntimeError, MavRuntimeState
 
 __all__ = [
     "DEFAULT_APPLICATION_MESSAGE_TYPE",
     "DEFAULT_APPLICATION_NETWORK",
-    "MavlinkApplicationAssembler",
-    "MavlinkApplicationChannel",
-    "MavlinkApplicationCodec",
-    "MavlinkApplicationDispatch",
-    "MavlinkApplicationDispatcher",
-    "MavlinkApplicationHandler",
-    "MavlinkApplicationHandlerRegistry",
-    "MavlinkApplicationPacket",
-    "MavlinkApplicationPeer",
-    "MavlinkApplicationPeerState",
-    "MavlinkApplicationProtocolError",
-    "MavlinkApplicationResponse",
-    "MavlinkApplicationResult",
-    "MavlinkAsyncChannel",
-    "MavlinkClient",
-    "MavlinkConnection",
-    "MavlinkEndpoint",
-    "MavlinkHeader",
-    "MavlinkMessage",
-    "MavlinkMessageEnvelope",
-    "MavlinkMessageFilter",
-    "MavlinkMessageRouter",
-    "MavlinkRemoteLogBatch",
-    "MavlinkRemoteLogLevel",
-    "MavlinkRemoteLogRecord",
-    "MavlinkRouterError",
-    "MavlinkRouterStats",
-    "MavlinkRuntime",
-    "MavlinkRuntimeError",
-    "MavlinkRuntimeState",
-    "MavlinkUnavailableError",
+    "MavApplicationAssembler",
+    "MavApplicationChannel",
+    "MavApplicationCodec",
+    "MavApplicationDispatch",
+    "MavApplicationDispatcher",
+    "MavApplicationHandler",
+    "MavApplicationHandlerRegistry",
+    "MavApplicationPacket",
+    "MavApplicationPeer",
+    "MavApplicationPeerState",
+    "MavApplicationProtocolError",
+    "MavApplicationResponse",
+    "MavApplicationResult",
+    "MavAsyncChannel",
+    "MavClient",
+    "MavConnection",
+    "MavEndpoint",
+    "MavHeader",
+    "MavMessage",
+    "MavMessageEnvelope",
+    "MavMessageFilter",
+    "MavMessageRouter",
+    "MavRemoteLogBatch",
+    "MavRemoteLogLevel",
+    "MavRemoteLogRecord",
+    "MavRouterError",
+    "MavRouterStats",
+    "MavRuntime",
+    "MavRuntimeError",
+    "MavRuntimeState",
+    "MavUnavailableError",
     "MessageCache",
     "REMOTE_LOG_MAX_BATCH_BYTES",
     "REMOTE_LOG_MAX_BATCH_RECORDS",

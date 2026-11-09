@@ -6,10 +6,10 @@ from typing import Any
 from eventflow import EventBus
 
 from mavflow import (
-    MavlinkApplicationPacket,
-    MavlinkEndpoint,
-    MavlinkRouterStats,
-    MavlinkRuntime,
+    MavApplicationPacket,
+    MavEndpoint,
+    MavRouterStats,
+    MavRuntime,
 )
 from mavflow._compatibility import ExceptionGroup
 
@@ -27,13 +27,13 @@ class FakeRouter:
         self.errors = EventBus[Any]()
 
     @property
-    def stats(self) -> MavlinkRouterStats:
-        return MavlinkRouterStats(False, 0, 0, 0, 0, 0, None, None, None)
+    def stats(self) -> MavRouterStats:
+        return MavRouterStats(False, 0, 0, 0, 0, 0, None, None, None)
 
 
 class FakeClient:
     def __init__(self, calls: list[str]) -> None:
-        self.endpoint = MavlinkEndpoint()
+        self.endpoint = MavEndpoint()
         self.connection = FakeConnection()
         self.router = FakeRouter()
         self.is_connected = False
@@ -74,7 +74,7 @@ class ImmediateClient(FakeClient):
 class FakePeer:
     def __init__(self, calls: list[str]) -> None:
         self.calls = calls
-        self.packets = EventBus[MavlinkApplicationPacket]()
+        self.packets = EventBus[MavApplicationPacket]()
         self.errors = EventBus[Exception]()
         self.alive = True
         self.sent: list[tuple[str, Any]] = []
@@ -85,9 +85,9 @@ class FakePeer:
     def stop(self) -> None:
         self.calls.append("peer:stop")
 
-    def send(self, packet_type: str, payload: Any = None) -> MavlinkApplicationPacket:
+    def send(self, packet_type: str, payload: Any = None) -> MavApplicationPacket:
         self.sent.append((packet_type, payload))
-        return MavlinkApplicationPacket(packet_type, payload or {})
+        return MavApplicationPacket(packet_type, payload or {})
 
     def request(self, *_args: Any, **_kwargs: Any) -> str:
         return "response"
@@ -122,13 +122,13 @@ class FailingStopPeer(FakePeer):
             raise TimeoutError("peer still stopping")
 
 
-class MavlinkRuntimeTests(unittest.TestCase):
+class MavRuntimeTests(unittest.TestCase):
     def test_runtime_owns_lifecycle_in_dependency_order(self) -> None:
         calls: list[str] = []
         client = FakeClient(calls)
         peer = FakePeer(calls)
         dispatcher = FakeDispatcher(calls)
-        runtime = MavlinkRuntime(
+        runtime = MavRuntime(
             client=client,  # type: ignore[arg-type]
             peer=peer,  # type: ignore[arg-type]
             dispatcher=dispatcher,  # type: ignore[arg-type]
@@ -154,7 +154,7 @@ class MavlinkRuntimeTests(unittest.TestCase):
         client = FakeClient(calls)
         peer = FakePeer(calls)
         dispatcher = FakeDispatcher(calls)
-        runtime = MavlinkRuntime(
+        runtime = MavRuntime(
             client=client,  # type: ignore[arg-type]
             peer=peer,  # type: ignore[arg-type]
             dispatcher=dispatcher,  # type: ignore[arg-type]
@@ -177,7 +177,7 @@ class MavlinkRuntimeTests(unittest.TestCase):
     def test_once_cancels_subscription_when_delivery_is_immediate(self) -> None:
         calls: list[str] = []
         client = ImmediateClient(calls)
-        runtime = MavlinkRuntime(client=client)  # type: ignore[arg-type]
+        runtime = MavRuntime(client=client)  # type: ignore[arg-type]
         received: list[Any] = []
 
         subscription = runtime.once("HEARTBEAT", received.append)
@@ -189,7 +189,7 @@ class MavlinkRuntimeTests(unittest.TestCase):
     def test_runtime_unifies_component_errors_and_reports_state(self) -> None:
         calls: list[str] = []
         client = FakeClient(calls)
-        runtime = MavlinkRuntime(client=client)  # type: ignore[arg-type]
+        runtime = MavRuntime(client=client)  # type: ignore[arg-type]
         errors: list[Any] = []
         runtime.errors.subscribe(errors.append)
 
@@ -205,8 +205,8 @@ class MavlinkRuntimeTests(unittest.TestCase):
         self.assertFalse(state.application_enabled)
 
     def test_application_role_builds_default_stack_without_connecting(self) -> None:
-        runtime = MavlinkRuntime(
-            MavlinkEndpoint.udp("127.0.0.1", 14550),
+        runtime = MavRuntime(
+            MavEndpoint.udp("127.0.0.1", 14550),
             application_role="vehicle",
         )
 
@@ -221,7 +221,7 @@ class MavlinkRuntimeTests(unittest.TestCase):
         client = FakeClient(calls)
         peer = FailingStopPeer(calls)
         dispatcher = FakeDispatcher(calls)
-        runtime = MavlinkRuntime(
+        runtime = MavRuntime(
             client=client,  # type: ignore[arg-type]
             peer=peer,  # type: ignore[arg-type]
             dispatcher=dispatcher,  # type: ignore[arg-type]

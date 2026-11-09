@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import argparse
 
-from mavflow import MavlinkEndpoint, MavlinkRuntime
+from mavflow import MavEndpoint, MavRuntime
 
 
 def main() -> None:
@@ -14,8 +14,8 @@ def main() -> None:
     parser.add_argument("--timeout", type=float, default=10.0, help="Heartbeat wait timeout")
     args = parser.parse_args()
 
-    endpoint = MavlinkEndpoint.udp(args.host, args.port)
-    with MavlinkRuntime(endpoint) as link:
+    endpoint = MavEndpoint.udp(args.host, args.port)
+    with MavRuntime(endpoint) as link:
         subscription = link.subscribe("HEARTBEAT", print)
         try:
             first = link.wait_for("HEARTBEAT", timeout=args.timeout)

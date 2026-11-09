@@ -82,7 +82,7 @@ def normalize_source_ids(value: int | Iterable[int] | None) -> frozenset[int] | 
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkMessageFilter:
+class MavMessageFilter:
     """Composite filter using MAVLink's native message metadata fields."""
 
     message_types: frozenset[str] | MessageTypeInput | None = None
@@ -103,7 +103,7 @@ class MavlinkMessageFilter:
             raise TypeError("MAVLink predicate callable olmalı")
 
     @classmethod
-    def for_types(cls, *message_types: str, **criteria: Any) -> MavlinkMessageFilter:
+    def for_types(cls, *message_types: str, **criteria: Any) -> MavMessageFilter:
         return cls(message_types=message_types, **criteria)
 
     def matches(
@@ -144,8 +144,8 @@ class MavlinkMessageFilter:
 
 
 def coerce_message_filter(
-    value: MavlinkMessageFilter | MessageTypeInput | None,
-) -> MavlinkMessageFilter:
-    if isinstance(value, MavlinkMessageFilter):
+    value: MavMessageFilter | MessageTypeInput | None,
+) -> MavMessageFilter:
+    if isinstance(value, MavMessageFilter):
         return value
-    return MavlinkMessageFilter(message_types=value)
+    return MavMessageFilter(message_types=value)

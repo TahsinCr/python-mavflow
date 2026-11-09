@@ -6,18 +6,18 @@ from collections import deque
 
 from eventflow import Subscription
 
-from .contracts import MavlinkMessage
-from .filter import MavlinkMessageFilter, MessageTypeInput
-from .router import MavlinkMessageRouter
+from .contracts import MavMessage
+from .filter import MavMessageFilter, MessageTypeInput
+from .router import MavMessageRouter
 
 
-class MavlinkAsyncChannel:
+class MavAsyncChannel:
     """Bounded, filtered bridge from the router thread into asyncio."""
 
     def __init__(
         self,
-        router: MavlinkMessageRouter,
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        router: MavMessageRouter,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
         *,
         maxsize: int = 128,
         loop: asyncio.AbstractEventLoop | None = None,
@@ -27,7 +27,7 @@ class MavlinkAsyncChannel:
         self._router = router
         self._message_filter = message_filter
         self._maxsize = maxsize
-        self._messages: deque[MavlinkMessage] = deque()
+        self._messages: deque[MavMessage] = deque()
         self._available = asyncio.Event()
         self._configured_loop = loop
         self._loop = loop
@@ -54,14 +54,14 @@ class MavlinkAsyncChannel:
             loop = self._loop
         if loop is not None and loop.is_closed():
             if self._configured_loop is not None:
-                raise RuntimeError("MavlinkAsyncChannel event loop kapalı")
+                raise RuntimeError("MavAsyncChannel event loop kapalı")
             loop = None
         if loop is None:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError as exc:
                 raise RuntimeError(
-                    "MavlinkAsyncChannel.start çalışan bir asyncio loop içinde çağrılmalı"
+                    "MavAsyncChannel.start çalışan bir asyncio loop içinde çağrılmalı"
                 ) from exc
             self._loop = loop
         with self._bridge_lock:
@@ -96,7 +96,7 @@ class MavlinkAsyncChannel:
 
     close = stop
 
-    async def receive(self, *, timeout: float | None = None) -> MavlinkMessage:
+    async def receive(self, *, timeout: float | None = None) -> MavMessage:
         if timeout is not None and timeout <= 0:
             raise ValueError("MAVLink async receive timeout pozitif olmalı")
         pending = self._receive_next()
@@ -109,18 +109,18 @@ class MavlinkAsyncChannel:
             )
         )
 
-    async def _receive_next(self) -> MavlinkMessage:
+    async def _receive_next(self) -> MavMessage:
         while True:
             with self._bridge_lock:
                 if self._messages:
                     return self._messages.popleft()
                 if self._subscription is None:
-                    raise RuntimeError("MavlinkAsyncChannel çalışmıyor")
+                    raise RuntimeError("MavAsyncChannel çalışmıyor")
                 available = self._available
                 available.clear()
             await available.wait()
 
-    def receive_nowait(self) -> MavlinkMessage:
+    def receive_nowait(self) -> MavMessage:
         with self._bridge_lock:
             try:
                 return self._messages.popleft()
@@ -129,7 +129,7 @@ class MavlinkAsyncChannel:
 
     def _forward(
         self,
-        message: MavlinkMessage,
+        message: MavMessage,
         generation: int | None = None,
     ) -> None:
         loop = self._loop

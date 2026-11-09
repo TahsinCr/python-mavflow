@@ -5,35 +5,35 @@ from typing import Any
 
 from eventflow import Subscription
 
-from .connection import MavlinkConnection
-from .endpoint import MavlinkEndpoint
-from .filter import MavlinkMessageFilter, MessagePredicate, MessageTypeInput
-from .router import MavlinkMessageRouter
+from .connection import MavConnection
+from .endpoint import MavEndpoint
+from .filter import MavMessageFilter, MessagePredicate, MessageTypeInput
+from .router import MavMessageRouter
 
 
-class MavlinkClient:
+class MavClient:
     """Combine connection and router lifecycles behind one modular interface."""
 
     def __init__(
         self,
-        endpoint: MavlinkEndpoint | None = None,
+        endpoint: MavEndpoint | None = None,
         *,
-        connection: MavlinkConnection | None = None,
-        router: MavlinkMessageRouter | None = None,
+        connection: MavConnection | None = None,
+        router: MavMessageRouter | None = None,
     ) -> None:
         if connection is None and router is not None:
             connection = router.connection
         if connection is None:
-            connection = MavlinkConnection(endpoint or MavlinkEndpoint())
+            connection = MavConnection(endpoint or MavEndpoint())
         elif endpoint is not None and connection.endpoint != endpoint:
-            raise ValueError("MavlinkClient endpoint ve connection endpoint uyuşmuyor")
+            raise ValueError("MavClient endpoint ve connection endpoint uyuşmuyor")
         if router is not None and router.connection is not connection:
-            raise ValueError("MavlinkClient router farklı bir connection kullanıyor")
+            raise ValueError("MavClient router farklı bir connection kullanıyor")
         self.connection = connection
-        self.router = router or MavlinkMessageRouter(connection)
+        self.router = router or MavMessageRouter(connection)
 
     @property
-    def endpoint(self) -> MavlinkEndpoint:
+    def endpoint(self) -> MavEndpoint:
         return self.connection.endpoint
 
     @property
@@ -54,7 +54,7 @@ class MavlinkClient:
     def stop(self) -> None:
         self.router.stop()
 
-    def configure_endpoint(self, endpoint: MavlinkEndpoint) -> None:
+    def configure_endpoint(self, endpoint: MavEndpoint) -> None:
         """Change transport settings of a closed client for its next connection."""
         if self.router.running or self.connection.is_connected:
             raise RuntimeError("Çalışan MAVLink istemcisi yeniden yapılandırılamaz")
@@ -65,13 +65,13 @@ class MavlinkClient:
     def subscribe(
         self,
         callback: Callable[[Any], None],
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
     ) -> Subscription:
         return self.router.subscribe(callback, message_filter)
 
     def wait_for(
         self,
-        message_types: MavlinkMessageFilter | MessageTypeInput,
+        message_types: MavMessageFilter | MessageTypeInput,
         *,
         predicate: MessagePredicate | None = None,
         timeout: float = 3.0,
@@ -86,7 +86,7 @@ class MavlinkClient:
 
     def latest(
         self,
-        message_filter: MavlinkMessageFilter | MessageTypeInput | None = None,
+        message_filter: MavMessageFilter | MessageTypeInput | None = None,
     ) -> Any | None:
         return self.router.latest(message_filter)
 
@@ -117,7 +117,7 @@ class MavlinkClient:
     def call_raw(self, method_name: str, *args: Any, **kwargs: Any) -> Any:
         return self.connection.call_raw(method_name, *args, **kwargs)
 
-    def __enter__(self) -> MavlinkClient:
+    def __enter__(self) -> MavClient:
         self.start()
         return self
 

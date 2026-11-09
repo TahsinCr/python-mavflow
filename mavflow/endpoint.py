@@ -5,7 +5,7 @@ from typing import Any
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkEndpoint:
+class MavEndpoint:
     uri: str = "udp:127.0.0.1:14550"
     baud: int = 115200
     source_system: int = 255
@@ -54,11 +54,11 @@ class MavlinkEndpoint:
         }
 
     @classmethod
-    def tcp(cls, host: str, port: int, **options: Any) -> MavlinkEndpoint:
+    def tcp(cls, host: str, port: int, **options: Any) -> MavEndpoint:
         return cls(uri=cls._network_uri("tcp", host, port), **options)
 
     @classmethod
-    def udp(cls, host: str, port: int, **options: Any) -> MavlinkEndpoint:
+    def udp(cls, host: str, port: int, **options: Any) -> MavEndpoint:
         return cls(uri=cls._network_uri("udp", host, port), **options)
 
     @classmethod
@@ -68,7 +68,7 @@ class MavlinkEndpoint:
         *,
         baud: int = 115200,
         **options: Any,
-    ) -> MavlinkEndpoint:
+    ) -> MavEndpoint:
         return cls(uri=device.strip(), baud=baud, **options)
 
     @staticmethod

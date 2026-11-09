@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
-from mavflow import MavlinkApplicationAssembler, MavlinkApplicationCodec, MavlinkApplicationPacket
+from mavflow import MavApplicationAssembler, MavApplicationCodec, MavApplicationPacket
 
 from ._runner import create_runner, positive_integer
 
 
-def _round_trip(packet: MavlinkApplicationPacket) -> MavlinkApplicationPacket:
-    assembler = MavlinkApplicationAssembler()
+def _round_trip(packet: MavApplicationPacket) -> MavApplicationPacket:
+    assembler = MavApplicationAssembler()
     decoded = None
-    for fragment in MavlinkApplicationCodec.encode(packet):
+    for fragment in MavApplicationCodec.encode(packet):
         decoded = assembler.accept(fragment, source_system=1, source_component=1)
     if decoded is None:
         raise RuntimeError("Benchmark packet did not reassemble")
@@ -26,7 +26,7 @@ def main() -> None:
         help="number of payload bytes encoded in each operation",
     )
     args = runner.parse_args()
-    packet = MavlinkApplicationPacket(
+    packet = MavApplicationPacket(
         "benchmark.payload",
         {"data": "x" * args.payload_bytes},
         packet_id=42,

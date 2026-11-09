@@ -8,9 +8,9 @@ import unittest
 
 from pymavlink import mavutil
 
-from mavflow.connection import MavlinkConnection
-from mavflow.endpoint import MavlinkEndpoint
-from mavflow.router import MavlinkMessageRouter
+from mavflow.connection import MavConnection
+from mavflow.endpoint import MavEndpoint
+from mavflow.router import MavMessageRouter
 
 
 class PymavlinkUdpIntegrationTests(unittest.TestCase):
@@ -19,12 +19,12 @@ class PymavlinkUdpIntegrationTests(unittest.TestCase):
             probe.bind(("127.0.0.1", 0))
             port = int(probe.getsockname()[1])
 
-        endpoint = MavlinkEndpoint(
+        endpoint = MavEndpoint(
             f"udpin:127.0.0.1:{port}",
             heartbeat_timeout=2.0,
         )
-        connection = MavlinkConnection(endpoint)
-        router = MavlinkMessageRouter(
+        connection = MavConnection(endpoint)
+        router = MavMessageRouter(
             connection,
             poll_timeout=0.02,
             stop_timeout=1.0,

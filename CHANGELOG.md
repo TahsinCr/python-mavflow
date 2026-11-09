@@ -6,7 +6,7 @@ All notable changes to Mavflow are documented here.
 
 ### Added
 
-- Prepare Mavflow 1.0.0 as a standalone Python package for MAVLink transport,
+- Prepare Mavflow v1.0.0 as a standalone Python package for MAVLink transport,
   message routing, application packets, peer coordination, and remote log models.
 - Extract the MAVLink package from [Vehicle Autonomy Core](https://github.com/TahsinCr/vehicle-autonomy-core/tree/main/mavlink).
 - Use [EventFlow](https://github.com/TahsinCr/python-eventflow) for synchronous
@@ -14,10 +14,13 @@ All notable changes to Mavflow are documented here.
 - Add the source project's MAVLink protocol, lifecycle, application protocol,
   and real `pymavlink` UDP loopback test.
 - Add Mavflow examples and pyperf-based router/codec benchmark entry points.
+- Add async-first quick-start documentation and runnable asyncio, filtered
+  telemetry, and message-history examples in English and Turkish.
 - Declare `pymavlink` as a required runtime dependency for MAVLink transport.
 
 ### Changed
 
+- Rename public `Mavlink*` classes and types to the shorter `Mav*` names.
 - Upgrade GitHub Actions checkout and Python setup to Node.js 24-compatible releases.
 - Use the `backports.strenum` and `exceptiongroup` packages for Python 3.10
   compatibility instead of local implementations; use built-ins on Python 3.11+.

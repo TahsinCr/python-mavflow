@@ -5,34 +5,34 @@ import queue
 import unittest
 from typing import Any
 
-from mavflow.connection import MavlinkConnection
-from mavflow.endpoint import MavlinkEndpoint
-from mavflow.filter import MavlinkMessageFilter
+from mavflow.connection import MavConnection
+from mavflow.endpoint import MavEndpoint
+from mavflow.filter import MavMessageFilter
 from mavflow.remote_log import (
     REMOTE_LOG_MAX_DETAILS_BYTES,
-    MavlinkRemoteLogBatch,
-    MavlinkRemoteLogLevel,
-    MavlinkRemoteLogRecord,
+    MavRemoteLogBatch,
+    MavRemoteLogLevel,
+    MavRemoteLogRecord,
 )
-from mavflow.router import MavlinkMessageRouter
+from mavflow.router import MavMessageRouter
 
 
 class EndpointTests(unittest.TestCase):
     def test_endpoint_normalizes_supported_transport_forms(self) -> None:
-        self.assertEqual(MavlinkEndpoint("127.0.0.1:5760").uri, "tcp:127.0.0.1:5760")
-        self.assertEqual(MavlinkEndpoint.tcp("localhost", 5760).uri, "tcp:localhost:5760")
-        self.assertEqual(MavlinkEndpoint.udp("0.0.0.0", 14550).uri, "udp:0.0.0.0:14550")
-        serial = MavlinkEndpoint.serial(" /dev/ttyUSB0 ", baud=57600)
+        self.assertEqual(MavEndpoint("127.0.0.1:5760").uri, "tcp:127.0.0.1:5760")
+        self.assertEqual(MavEndpoint.tcp("localhost", 5760).uri, "tcp:localhost:5760")
+        self.assertEqual(MavEndpoint.udp("0.0.0.0", 14550).uri, "udp:0.0.0.0:14550")
+        serial = MavEndpoint.serial(" /dev/ttyUSB0 ", baud=57600)
         self.assertEqual((serial.uri, serial.baud), ("/dev/ttyUSB0", 57600))
 
     def test_endpoint_rejects_invalid_values(self) -> None:
         for uri in ("udp:127.0.0.1:0", "tcp:localhost:65536", "udp:host:not-a-port"):
             with self.subTest(uri=uri), self.assertRaises(ValueError):
-                MavlinkEndpoint(uri)
+                MavEndpoint(uri)
         with self.assertRaises(ValueError):
-            MavlinkEndpoint(source_system=256)
+            MavEndpoint(source_system=256)
         with self.assertRaises(ValueError):
-            MavlinkEndpoint(heartbeat_timeout=0)
+            MavEndpoint(heartbeat_timeout=0)
 
 
 class _Header:
@@ -83,7 +83,7 @@ class MessageFilterTests(unittest.TestCase):
             component=1,
             value=9,
         )
-        message_filter = MavlinkMessageFilter(
+        message_filter = MavMessageFilter(
             message_types=["heartbeat", "global_position_int"],
             message_ids=[0, 33],
             source_systems=4,
@@ -94,15 +94,15 @@ class MessageFilterTests(unittest.TestCase):
 
         self.assertTrue(message_filter.matches(message, condition_evaluator=lambda _value: True))
         self.assertFalse(message_filter.matches(message, condition_evaluator=lambda _value: False))
-        self.assertFalse(MavlinkMessageFilter.for_types("HEARTBEAT").matches(message))
+        self.assertFalse(MavMessageFilter.for_types("HEARTBEAT").matches(message))
 
     def test_filter_validates_empty_and_out_of_range_criteria(self) -> None:
         with self.assertRaises(ValueError):
-            MavlinkMessageFilter(message_types=[])
+            MavMessageFilter(message_types=[])
         with self.assertRaises(ValueError):
-            MavlinkMessageFilter(source_systems=256)
+            MavMessageFilter(source_systems=256)
         with self.assertRaises(TypeError):
-            MavlinkMessageFilter(predicate="not callable")  # type: ignore[arg-type]
+            MavMessageFilter(predicate="not callable")  # type: ignore[arg-type]
 
 
 class _MavSender:
@@ -147,7 +147,7 @@ class _RawConnection:
         self.closed += 1
 
 
-class _MavlinkConstants:
+class _MavConstants:
     MAV_CMD_SET_MESSAGE_INTERVAL = 511
     MAV_TYPE_GCS = 6
     MAV_AUTOPILOT_INVALID = 8
@@ -155,7 +155,7 @@ class _MavlinkConstants:
 
 
 class _MavutilStub:
-    mavlink = _MavlinkConstants()
+    mavlink = _MavConstants()
 
     @staticmethod
     def evaluate_condition(condition: str, messages: dict[str, Any]) -> bool:
@@ -165,8 +165,8 @@ class _MavutilStub:
 class ConnectionTests(unittest.TestCase):
     def test_connection_lifecycle_filters_nonvehicle_heartbeat_and_serializes_calls(self) -> None:
         raw = _RawConnection(["companion", "vehicle"])
-        connection = MavlinkConnection(
-            MavlinkEndpoint(heartbeat_timeout=0.1),
+        connection = MavConnection(
+            MavEndpoint(heartbeat_timeout=0.1),
             connection_factory=lambda _endpoint: raw,
             mavutil_module=_MavutilStub(),
         )
@@ -207,8 +207,8 @@ class ConnectionTests(unittest.TestCase):
 
     def test_connect_failure_closes_partial_transport_and_publishes_error(self) -> None:
         raw = _RawConnection([])
-        connection = MavlinkConnection(
-            MavlinkEndpoint(heartbeat_timeout=0.01),
+        connection = MavConnection(
+            MavEndpoint(heartbeat_timeout=0.01),
             connection_factory=lambda _endpoint: raw,
         )
         errors: list[Exception] = []
@@ -223,8 +223,8 @@ class ConnectionTests(unittest.TestCase):
 
     def test_invalid_send_method_is_reported(self) -> None:
         raw = _RawConnection(["vehicle"])
-        connection = MavlinkConnection(
-            MavlinkEndpoint(heartbeat_timeout=0.1),
+        connection = MavConnection(
+            MavEndpoint(heartbeat_timeout=0.1),
             connection_factory=lambda _endpoint: raw,
         )
         errors: list[Exception] = []
@@ -263,7 +263,7 @@ class _RouterConnection:
 class RouterContractTests(unittest.TestCase):
     def test_router_filters_history_latest_and_wait_timeout(self) -> None:
         connection = _RouterConnection()
-        router = MavlinkMessageRouter(
+        router = MavMessageRouter(
             connection,  # type: ignore[arg-type]
             poll_timeout=0.01,
             stop_timeout=0.2,
@@ -271,7 +271,7 @@ class RouterContractTests(unittest.TestCase):
         received: list[int] = []
         router.subscribe(
             lambda message: received.append(message.value),
-            MavlinkMessageFilter(
+            MavMessageFilter(
                 message_types="HEARTBEAT",
                 source_systems=3,
                 condition="ready",
@@ -285,7 +285,7 @@ class RouterContractTests(unittest.TestCase):
             _RichMessage("HEARTBEAT", message_id=0, system=3, component=1, value=2)
         )
         matched = router.wait_for(
-            MavlinkMessageFilter(message_types="HEARTBEAT", source_systems=3),
+            MavMessageFilter(message_types="HEARTBEAT", source_systems=3),
             timeout=1.0,
         )
 
@@ -299,7 +299,7 @@ class RouterContractTests(unittest.TestCase):
 
 
 class RemoteLogTests(unittest.TestCase):
-    def _record(self, sequence: int = 1, **changes: Any) -> MavlinkRemoteLogRecord:
+    def _record(self, sequence: int = 1, **changes: Any) -> MavRemoteLogRecord:
         values = {
             "sequence": sequence,
             "source": "mission",
@@ -307,11 +307,11 @@ class RemoteLogTests(unittest.TestCase):
             "message": "Mission started",
             **changes,
         }
-        return MavlinkRemoteLogRecord(**values)
+        return MavRemoteLogRecord(**values)
 
     def test_remote_log_is_domain_only_detached_and_round_trips(self) -> None:
         details = {"nested": {"values": [1]}}
-        record = self._record(details=details, level=MavlinkRemoteLogLevel.ERROR)
+        record = self._record(details=details, level=MavRemoteLogLevel.ERROR)
         details["nested"]["values"].append(2)  # type: ignore[index,union-attr]
 
         self.assertFalse(hasattr(record.level, "yki_severity"))
@@ -323,8 +323,8 @@ class RemoteLogTests(unittest.TestCase):
             record.details["nested"]["values"].append(2)  # type: ignore[union-attr]
         copied = self._record(2, details=record.details)
         self.assertEqual(copied.to_payload()["details"], record.to_payload()["details"])
-        batch = MavlinkRemoteLogBatch("session-001", (record, copied))
-        restored = MavlinkRemoteLogBatch.from_payload(batch.to_payload())
+        batch = MavRemoteLogBatch("session-001", (record, copied))
+        restored = MavRemoteLogBatch.from_payload(batch.to_payload())
         self.assertEqual(restored.to_payload(), batch.to_payload())
 
     def test_remote_log_validates_details_order_and_version(self) -> None:
@@ -333,11 +333,9 @@ class RemoteLogTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self._record(details={"text": "x" * REMOTE_LOG_MAX_DETAILS_BYTES})
         with self.assertRaises(ValueError):
-            MavlinkRemoteLogBatch("session-001", (self._record(2), self._record(1)))
+            MavRemoteLogBatch("session-001", (self._record(2), self._record(1)))
         with self.assertRaisesRegex(ValueError, "protocol version"):
-            MavlinkRemoteLogBatch.from_payload(
-                {"version": 99, "session": "session-001", "records": []}
-            )
+            MavRemoteLogBatch.from_payload({"version": 99, "session": "session-001", "records": []})
 
 
 if __name__ == "__main__":

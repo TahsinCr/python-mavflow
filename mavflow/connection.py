@@ -7,24 +7,24 @@ from typing import Any
 
 from eventflow import EventBus
 
-from .endpoint import MavlinkEndpoint
+from .endpoint import MavEndpoint
 from .filter import MessageTypeInput, normalize_message_types
 
-ConnectionFactory = Callable[[MavlinkEndpoint], Any]
+ConnectionFactory = Callable[[MavEndpoint], Any]
 
 
-class MavlinkUnavailableError(RuntimeError):
+class MavUnavailableError(RuntimeError):
     pass
 
 
-class MavlinkConnection:
+class MavConnection:
     """Own a pymavlink connection and provide thread-safe I/O access."""
 
     UDP_DISCOVERY_INTERVAL_S = 1.0
 
     def __init__(
         self,
-        endpoint: MavlinkEndpoint,
+        endpoint: MavEndpoint,
         *,
         connection_factory: ConnectionFactory | None = None,
         mavutil_module: Any | None = None,
@@ -289,7 +289,7 @@ class MavlinkConnection:
             try:
                 from pymavlink import mavutil
             except ImportError as exc:
-                raise MavlinkUnavailableError("MAVLink kullanmak için pymavlink kurulmalı") from exc
+                raise MavUnavailableError("MAVLink kullanmak için pymavlink kurulmalı") from exc
             self._mavutil_module = mavutil
             return mavutil
 
@@ -298,7 +298,7 @@ class MavlinkConnection:
 
     close = stop
 
-    def __enter__(self) -> MavlinkConnection:
+    def __enter__(self) -> MavConnection:
         self.start()
         return self
 

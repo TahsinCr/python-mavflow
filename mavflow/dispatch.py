@@ -8,12 +8,12 @@ from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from .application import MavlinkApplicationPacket
-from .peer import MavlinkApplicationPeer
+from .application import MavApplicationPacket
+from .peer import MavApplicationPeer
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkApplicationResult:
+class MavApplicationResult:
     """Transport-neutral result returned by an application packet handler."""
 
     accepted: bool = True
@@ -30,7 +30,7 @@ class MavlinkApplicationResult:
         object.__setattr__(
             self,
             "payload",
-            MavlinkApplicationPacket._freeze_payload_value(self.payload),
+            MavApplicationPacket._freeze_payload_value(self.payload),
         )
         object.__setattr__(self, "response_type", response_type)
 
@@ -40,7 +40,7 @@ class MavlinkApplicationResult:
         payload: Mapping[str, Any] | None = None,
         *,
         message: str = "Command accepted",
-    ) -> MavlinkApplicationResult:
+    ) -> MavApplicationResult:
         return cls(True, message, dict(payload or {}))
 
     @classmethod
@@ -48,31 +48,31 @@ class MavlinkApplicationResult:
         cls,
         message: str,
         payload: Mapping[str, Any] | None = None,
-    ) -> MavlinkApplicationResult:
+    ) -> MavApplicationResult:
         return cls(False, message, dict(payload or {}))
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkApplicationDispatch:
+class MavApplicationDispatch:
     """Record a handled request and the result produced for it."""
 
-    packet: MavlinkApplicationPacket
-    result: MavlinkApplicationResult
+    packet: MavApplicationPacket
+    result: MavApplicationResult
 
 
-MavlinkApplicationHandler = Callable[
-    [MavlinkApplicationPacket],
-    MavlinkApplicationResult | Mapping[str, Any] | None,
+MavApplicationHandler = Callable[
+    [MavApplicationPacket],
+    MavApplicationResult | Mapping[str, Any] | None,
 ]
 
 
-class MavlinkApplicationHandlerRegistry:
+class MavApplicationHandlerRegistry:
     """Keep packet handlers independent from a channel or peer lifecycle."""
 
     def __init__(self) -> None:
         self._handlers: dict[
             str,
-            tuple[object, MavlinkApplicationHandler],
+            tuple[object, MavApplicationHandler],
         ] = {}
         self._lock = threading.RLock()
 
@@ -84,12 +84,12 @@ class MavlinkApplicationHandlerRegistry:
     def register(
         self,
         packet_type: str,
-        handler: MavlinkApplicationHandler,
+        handler: MavApplicationHandler,
         *,
         replace: bool = False,
     ) -> Subscription:
         normalized = _normalize_packet_type(packet_type)
-        if normalized in MavlinkApplicationDispatcher.RESERVED_TYPES:
+        if normalized in MavApplicationDispatcher.RESERVED_TYPES:
             raise ValueError(f"Reserved application packet type: {normalized}")
         if not callable(handler):
             raise TypeError("Application packet handler must be callable")
@@ -107,32 +107,30 @@ class MavlinkApplicationHandlerRegistry:
 
         return Subscription(id(token), cancel)
 
-    def resolve(self, packet_type: str) -> MavlinkApplicationHandler | None:
+    def resolve(self, packet_type: str) -> MavApplicationHandler | None:
         with self._lock:
             entry = self._handlers.get(_normalize_packet_type(packet_type))
             return entry[1] if entry is not None else None
 
 
-class MavlinkApplicationDispatcher:
+class MavApplicationDispatcher:
     """Route application packets without blocking the MAVLink receive thread.
 
     Handlers are registered by packet type. Notifications are handled without
-    a reply, while packets sent through ``MavlinkApplicationPeer.request``
+    a reply, while packets sent through ``MavApplicationPeer.request``
     receive a correlated ``system.ack`` or ``system.error`` automatically.
     """
 
-    RESERVED_TYPES = MavlinkApplicationPeer.LIVENESS_TYPES | frozenset(
-        {"system.ack", "system.error"}
-    )
+    RESERVED_TYPES = MavApplicationPeer.LIVENESS_TYPES | frozenset({"system.ack", "system.error"})
 
     def __init__(
         self,
-        peer: MavlinkApplicationPeer,
+        peer: MavApplicationPeer,
         *,
         workers: int = 1,
         max_pending: int = 64,
-        thread_name: str = "MavlinkApplicationDispatch",
-        handlers: MavlinkApplicationHandlerRegistry | None = None,
+        thread_name: str = "MavApplicationDispatch",
+        handlers: MavApplicationHandlerRegistry | None = None,
     ) -> None:
         if int(workers) <= 0:
             raise ValueError("Application dispatcher worker count must be positive")
@@ -140,17 +138,17 @@ class MavlinkApplicationDispatcher:
             raise ValueError("Application dispatcher queue limit must be positive")
         self._peer = peer
         self._workers = int(workers)
-        self._thread_name = str(thread_name).strip() or "MavlinkApplicationDispatch"
+        self._thread_name = str(thread_name).strip() or "MavApplicationDispatch"
         self._capacity = threading.BoundedSemaphore(int(max_pending))
-        self._handlers = handlers or MavlinkApplicationHandlerRegistry()
+        self._handlers = handlers or MavApplicationHandlerRegistry()
         self._subscription: Subscription | None = None
         self._executor: ThreadPoolExecutor | None = None
         self._generation = 0
         self._lock = threading.RLock()
         self._worker_context = threading.local()
 
-        self.handled = EventBus[MavlinkApplicationDispatch]()
-        self.unhandled = EventBus[MavlinkApplicationPacket]()
+        self.handled = EventBus[MavApplicationDispatch]()
+        self.unhandled = EventBus[MavApplicationPacket]()
         self.errors = EventBus[Exception]()
 
     @property
@@ -165,7 +163,7 @@ class MavlinkApplicationDispatcher:
     def register(
         self,
         packet_type: str,
-        handler: MavlinkApplicationHandler,
+        handler: MavApplicationHandler,
         *,
         replace: bool = False,
     ) -> Subscription:
@@ -182,7 +180,7 @@ class MavlinkApplicationDispatcher:
             )
             self._subscription = self._peer.packets.subscribe(self._on_packet)
 
-    def _on_packet(self, packet: MavlinkApplicationPacket) -> None:
+    def _on_packet(self, packet: MavApplicationPacket) -> None:
         self.dispatch(packet)
 
     def stop(self) -> None:
@@ -201,7 +199,7 @@ class MavlinkApplicationDispatcher:
                 cancel_futures=True,
             )
 
-    def dispatch(self, packet: MavlinkApplicationPacket) -> bool:
+    def dispatch(self, packet: MavApplicationPacket) -> bool:
         """Queue one packet for its registered handler."""
 
         if packet.packet_type in self.RESERVED_TYPES:
@@ -218,7 +216,7 @@ class MavlinkApplicationDispatcher:
             if packet.expects_response:
                 self._respond(
                     packet,
-                    MavlinkApplicationResult.failure(
+                    MavApplicationResult.failure(
                         f"Unsupported application packet type: {packet.packet_type}",
                         {"error_type": "UnsupportedPacket"},
                     ),
@@ -230,7 +228,7 @@ class MavlinkApplicationDispatcher:
             if packet.expects_response:
                 self._respond(
                     packet,
-                    MavlinkApplicationResult.failure(
+                    MavApplicationResult.failure(
                         str(error),
                         {"error_type": "DispatcherBusy"},
                     ),
@@ -244,7 +242,7 @@ class MavlinkApplicationDispatcher:
             if packet.expects_response and self._is_generation_active(generation):
                 self._respond(
                     packet,
-                    MavlinkApplicationResult.failure(
+                    MavApplicationResult.failure(
                         str(exc),
                         {"error_type": exc.__class__.__name__},
                     ),
@@ -255,8 +253,8 @@ class MavlinkApplicationDispatcher:
 
     def _execute(
         self,
-        packet: MavlinkApplicationPacket,
-        handler: MavlinkApplicationHandler,
+        packet: MavApplicationPacket,
+        handler: MavApplicationHandler,
         generation: int,
     ) -> None:
         self._worker_context.active = True
@@ -267,26 +265,26 @@ class MavlinkApplicationDispatcher:
 
     def _handle(
         self,
-        packet: MavlinkApplicationPacket,
-        handler: MavlinkApplicationHandler,
+        packet: MavApplicationPacket,
+        handler: MavApplicationHandler,
         generation: int,
     ) -> None:
         error: Exception | None = None
         try:
             returned = handler(packet)
-            if isinstance(returned, MavlinkApplicationResult):
+            if isinstance(returned, MavApplicationResult):
                 result = returned
             elif returned is None:
-                result = MavlinkApplicationResult.success()
+                result = MavApplicationResult.success()
             elif isinstance(returned, Mapping):
-                result = MavlinkApplicationResult.success(returned)
+                result = MavApplicationResult.success(returned)
             else:
                 raise TypeError(
                     "Application packet handlers must return a result, mapping, or None"
                 )
         except Exception as exc:
             error = exc
-            result = MavlinkApplicationResult.failure(
+            result = MavApplicationResult.failure(
                 str(exc),
                 {"error_type": exc.__class__.__name__},
             )
@@ -294,16 +292,16 @@ class MavlinkApplicationDispatcher:
             return
         if error is not None:
             self.errors.publish(error)
-        self.handled.publish(MavlinkApplicationDispatch(packet, result))
+        self.handled.publish(MavApplicationDispatch(packet, result))
         if packet.expects_response:
             self._respond(packet, result)
 
     def _respond(
         self,
-        request: MavlinkApplicationPacket,
-        result: MavlinkApplicationResult,
+        request: MavApplicationPacket,
+        result: MavApplicationResult,
     ) -> None:
-        payload = MavlinkApplicationPacket._copy_payload_value(result.payload)
+        payload = MavApplicationPacket._copy_payload_value(result.payload)
         payload.update(
             {
                 "request_id": request.packet_id,
@@ -338,9 +336,9 @@ def _normalize_packet_type(packet_type: str) -> str:
 
 
 __all__ = [
-    "MavlinkApplicationDispatch",
-    "MavlinkApplicationDispatcher",
-    "MavlinkApplicationHandler",
-    "MavlinkApplicationHandlerRegistry",
-    "MavlinkApplicationResult",
+    "MavApplicationDispatch",
+    "MavApplicationDispatcher",
+    "MavApplicationHandler",
+    "MavApplicationHandlerRegistry",
+    "MavApplicationResult",
 ]

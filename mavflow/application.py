@@ -15,9 +15,9 @@ from typing import Any
 
 from eventflow import EventBus, Subscription
 
-from .client import MavlinkClient
+from .client import MavClient
 from .filter import (
-    MavlinkMessageFilter,
+    MavMessageFilter,
     mavlink_source_component,
     mavlink_source_system,
 )
@@ -35,7 +35,7 @@ _MAX_PACKET_BYTES = _CHUNK_SIZE * _MAX_FRAGMENT_COUNT
 _MAX_PACKET_TYPE_LENGTH = 96
 
 
-class MavlinkApplicationProtocolError(ValueError):
+class MavApplicationProtocolError(ValueError):
     """Report a malformed or incompatible application-channel packet."""
 
 
@@ -53,7 +53,7 @@ def _raise_invalid_json_constant(value: str) -> None:
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkApplicationPacket:
+class MavApplicationPacket:
     """Extensible application packet independent from MAVLink transport."""
 
     packet_type: str
@@ -70,14 +70,14 @@ class MavlinkApplicationPacket:
         if isinstance(value, Mapping):
             return MappingProxyType(
                 {
-                    deepcopy(key): MavlinkApplicationPacket._freeze_payload_value(item)
+                    deepcopy(key): MavApplicationPacket._freeze_payload_value(item)
                     for key, item in value.items()
                 }
             )
         if isinstance(value, (tuple, list)):
-            return tuple(MavlinkApplicationPacket._freeze_payload_value(item) for item in value)
+            return tuple(MavApplicationPacket._freeze_payload_value(item) for item in value)
         if isinstance(value, (set, frozenset)):
-            return frozenset(MavlinkApplicationPacket._freeze_payload_value(item) for item in value)
+            return frozenset(MavApplicationPacket._freeze_payload_value(item) for item in value)
         return deepcopy(value)
 
     @staticmethod
@@ -85,15 +85,15 @@ class MavlinkApplicationPacket:
         """Return a detached mutable representation of a packet payload value."""
         if isinstance(value, Mapping):
             return {
-                deepcopy(key): MavlinkApplicationPacket._copy_payload_value(item)
+                deepcopy(key): MavApplicationPacket._copy_payload_value(item)
                 for key, item in value.items()
             }
         if isinstance(value, tuple):
-            return [MavlinkApplicationPacket._copy_payload_value(item) for item in value]
+            return [MavApplicationPacket._copy_payload_value(item) for item in value]
         if isinstance(value, list):
-            return [MavlinkApplicationPacket._copy_payload_value(item) for item in value]
+            return [MavApplicationPacket._copy_payload_value(item) for item in value]
         if isinstance(value, (set, frozenset)):
-            return {MavlinkApplicationPacket._copy_payload_value(item) for item in value}
+            return {MavApplicationPacket._copy_payload_value(item) for item in value}
         return deepcopy(value)
 
     def __post_init__(self) -> None:
@@ -159,14 +159,14 @@ class _Assembly:
     byte_count: int = 0
 
 
-class MavlinkApplicationCodec:
+class MavApplicationCodec:
     """Safely fragment JSON packets across V2_EXTENSION's 249-byte payload."""
 
     max_packet_bytes = _MAX_PACKET_BYTES
     chunk_size = _CHUNK_SIZE
 
     @classmethod
-    def encode(cls, packet: MavlinkApplicationPacket) -> tuple[bytes, ...]:
+    def encode(cls, packet: MavApplicationPacket) -> tuple[bytes, ...]:
         try:
             body = json.dumps(
                 {
@@ -180,13 +180,13 @@ class MavlinkApplicationCodec:
                 separators=(",", ":"),
             ).encode("utf-8")
         except (TypeError, ValueError) as exc:
-            raise MavlinkApplicationProtocolError(
+            raise MavApplicationProtocolError(
                 f"Uygulama paketi JSON olarak kodlanamadı: {exc}"
             ) from exc
         if not body:
-            raise MavlinkApplicationProtocolError("Uygulama paketi boş olamaz")
+            raise MavApplicationProtocolError("Uygulama paketi boş olamaz")
         if len(body) > cls.max_packet_bytes:
-            raise MavlinkApplicationProtocolError(
+            raise MavApplicationProtocolError(
                 f"Uygulama paketi çok büyük: {len(body)} > {cls.max_packet_bytes} bayt"
             )
         count = max(1, (len(body) + cls.chunk_size - 1) // cls.chunk_size)
@@ -213,22 +213,20 @@ class MavlinkApplicationCodec:
     def decode_fragment(cls, payload: bytes | bytearray | list[int] | tuple[int, ...]) -> _Fragment:
         raw = bytes(payload)
         if len(raw) < _HEADER.size:
-            raise MavlinkApplicationProtocolError("Uygulama fragment başlığı eksik")
+            raise MavApplicationProtocolError("Uygulama fragment başlığı eksik")
         magic, version, _flags, packet_id, index, count, chunk_length, checksum = (
             _HEADER.unpack_from(raw)
         )
         if magic != _MAGIC:
-            raise MavlinkApplicationProtocolError("Uygulama fragment imzası geçersiz")
+            raise MavApplicationProtocolError("Uygulama fragment imzası geçersiz")
         if version != _VERSION:
-            raise MavlinkApplicationProtocolError(
-                f"Desteklenmeyen uygulama protokol sürümü: {version}"
-            )
+            raise MavApplicationProtocolError(f"Desteklenmeyen uygulama protokol sürümü: {version}")
         if not 0 < packet_id <= 0xFFFFFFFF:
-            raise MavlinkApplicationProtocolError("Uygulama paket kimliği geçersiz")
+            raise MavApplicationProtocolError("Uygulama paket kimliği geçersiz")
         if not 1 <= count <= _MAX_FRAGMENT_COUNT or index >= count:
-            raise MavlinkApplicationProtocolError("Uygulama fragment sırası geçersiz")
+            raise MavApplicationProtocolError("Uygulama fragment sırası geçersiz")
         if chunk_length > cls.chunk_size or _HEADER.size + chunk_length > len(raw):
-            raise MavlinkApplicationProtocolError("Uygulama fragment uzunluğu geçersiz")
+            raise MavApplicationProtocolError("Uygulama fragment uzunluğu geçersiz")
         return _Fragment(
             packet_id,
             index,
@@ -244,20 +242,18 @@ class MavlinkApplicationCodec:
         *,
         source_system: int | None = None,
         source_component: int | None = None,
-    ) -> MavlinkApplicationPacket:
+    ) -> MavApplicationPacket:
         try:
             decoded = json.loads(
                 body.decode("utf-8"),
                 parse_constant=lambda value: _raise_invalid_json_constant(value),
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
-            raise MavlinkApplicationProtocolError(
-                f"Uygulama paket gövdesi çözülemedi: {exc}"
-            ) from exc
+            raise MavApplicationProtocolError(f"Uygulama paket gövdesi çözülemedi: {exc}") from exc
         if not isinstance(decoded, dict) or not isinstance(decoded.get("payload", {}), dict):
-            raise MavlinkApplicationProtocolError("Uygulama paket gövdesi nesne olmalı")
+            raise MavApplicationProtocolError("Uygulama paket gövdesi nesne olmalı")
         try:
-            return MavlinkApplicationPacket(
+            return MavApplicationPacket(
                 str(decoded.get("type", "")),
                 decoded.get("payload", {}),
                 packet_id,
@@ -267,12 +263,10 @@ class MavlinkApplicationCodec:
                 bool(decoded.get("reply", False)),
             )
         except (TypeError, ValueError, OverflowError) as exc:
-            raise MavlinkApplicationProtocolError(
-                f"Uygulama paket gövdesi geçersiz: {exc}"
-            ) from exc
+            raise MavApplicationProtocolError(f"Uygulama paket gövdesi geçersiz: {exc}") from exc
 
 
-class MavlinkApplicationAssembler:
+class MavApplicationAssembler:
     """Reassemble out-of-order fragments into one packet per source identity."""
 
     def __init__(
@@ -307,8 +301,8 @@ class MavlinkApplicationAssembler:
         *,
         source_system: int | None = None,
         source_component: int | None = None,
-    ) -> MavlinkApplicationPacket | None:
-        fragment = MavlinkApplicationCodec.decode_fragment(payload)
+    ) -> MavApplicationPacket | None:
+        fragment = MavApplicationCodec.decode_fragment(payload)
         key = (source_system or 0, source_component or 0, fragment.packet_id)
         now = time.monotonic()
         with self._lock:
@@ -318,24 +312,22 @@ class MavlinkApplicationAssembler:
             assembly = self._assemblies.get(key)
             if assembly is None:
                 if len(self._assemblies) >= self._max_inflight_assemblies:
-                    raise MavlinkApplicationProtocolError(
-                        "Çok fazla tamamlanmamış uygulama paketi var"
-                    )
+                    raise MavApplicationProtocolError("Çok fazla tamamlanmamış uygulama paketi var")
                 assembly = _Assembly(fragment.count, fragment.checksum, now)
                 self._assemblies[key] = assembly
             elif assembly.count != fragment.count or assembly.checksum != fragment.checksum:
                 self._discard_assembly(key)
-                raise MavlinkApplicationProtocolError(
+                raise MavApplicationProtocolError(
                     "Aynı kimlikte uyuşmayan uygulama fragmentleri alındı"
                 )
             previous = assembly.fragments.get(fragment.index)
             if previous is not None and previous != fragment.chunk:
                 self._discard_assembly(key)
-                raise MavlinkApplicationProtocolError("Tekrarlanan fragment içeriği uyuşmuyor")
+                raise MavApplicationProtocolError("Tekrarlanan fragment içeriği uyuşmuyor")
             if previous is None:
                 if self._inflight_bytes + len(fragment.chunk) > self._max_inflight_bytes:
                     self._discard_assembly(key)
-                    raise MavlinkApplicationProtocolError(
+                    raise MavApplicationProtocolError(
                         "Tamamlanmamış uygulama paketleri byte sınırını aştı"
                     )
                 assembly.fragments[fragment.index] = fragment.chunk
@@ -346,11 +338,11 @@ class MavlinkApplicationAssembler:
             body = b"".join(assembly.fragments[index] for index in range(assembly.count))
             self._discard_assembly(key)
             if zlib.crc32(body) & 0xFFFFFFFF != assembly.checksum:
-                raise MavlinkApplicationProtocolError("Uygulama paketi CRC doğrulamasını geçemedi")
+                raise MavApplicationProtocolError("Uygulama paketi CRC doğrulamasını geçemedi")
             self._completed[key] = now
             while len(self._completed) > self._max_completed_packets:
                 self._completed.pop(next(iter(self._completed)))
-        return MavlinkApplicationCodec.decode_packet(
+        return MavApplicationCodec.decode_packet(
             fragment.packet_id,
             body,
             source_system=source_system,
@@ -388,7 +380,7 @@ class MavlinkApplicationAssembler:
         self._next_prune_at = now + min(self._fragment_timeout, 1.0)
 
 
-class MavlinkApplicationChannel:
+class MavApplicationChannel:
     """Targeted bidirectional application channel over an existing MAVLink router.
 
     It opens no additional serial reader and shares the MAVLink connection and
@@ -397,7 +389,7 @@ class MavlinkApplicationChannel:
 
     def __init__(
         self,
-        client: MavlinkClient,
+        client: MavClient,
         *,
         network_id: int = DEFAULT_APPLICATION_NETWORK,
         message_type: int = DEFAULT_APPLICATION_MESSAGE_TYPE,
@@ -432,9 +424,9 @@ class MavlinkApplicationChannel:
         self.local_component = (
             client.endpoint.source_component if local_component is None else int(local_component)
         )
-        self.packets = EventBus[MavlinkApplicationPacket]()
+        self.packets = EventBus[MavApplicationPacket]()
         self.errors = EventBus[Exception]()
-        self._assembler = MavlinkApplicationAssembler(
+        self._assembler = MavApplicationAssembler(
             fragment_timeout=fragment_timeout,
             max_inflight_assemblies=max_inflight_assemblies,
             max_inflight_bytes=max_inflight_bytes,
@@ -456,7 +448,7 @@ class MavlinkApplicationChannel:
                 return
             self._subscription = self._client.subscribe(
                 self._on_message,
-                MavlinkMessageFilter.for_types(
+                MavMessageFilter.for_types(
                     "V2_EXTENSION",
                     source_systems=self._source_systems,
                     source_components=self._source_components,
@@ -481,8 +473,8 @@ class MavlinkApplicationChannel:
         target_system: int | None = None,
         target_component: int | None = None,
         expects_response: bool = False,
-    ) -> MavlinkApplicationPacket:
-        packet = MavlinkApplicationPacket(
+    ) -> MavApplicationPacket:
+        packet = MavApplicationPacket(
             packet_type,
             dict(payload or {}),
             packet_id if packet_id is not None else (secrets.randbits(32) or 1),
@@ -492,7 +484,7 @@ class MavlinkApplicationChannel:
         component = self.target_component if target_component is None else int(target_component)
         if not 0 <= system <= 255 or not 0 <= component <= 255:
             raise ValueError("Hedef system/component 0..255 aralığında olmalı")
-        for fragment in MavlinkApplicationCodec.encode(packet):
+        for fragment in MavApplicationCodec.encode(packet):
             padded = list(fragment) + [0] * (V2_EXTENSION_PAYLOAD_SIZE - len(fragment))
             self._client.call_mav(
                 "v2_extension_send",

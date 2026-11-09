@@ -9,11 +9,11 @@ from typing import Any
 
 from eventflow import EventBus
 
-from mavflow.application import MavlinkApplicationPacket
-from mavflow.channel import MavlinkAsyncChannel
-from mavflow.dispatch import MavlinkApplicationDispatcher
-from mavflow.peer import MavlinkApplicationPeer
-from mavflow.router import MavlinkMessageRouter
+from mavflow.application import MavApplicationPacket
+from mavflow.channel import MavAsyncChannel
+from mavflow.dispatch import MavApplicationDispatcher
+from mavflow.peer import MavApplicationPeer
+from mavflow.router import MavMessageRouter
 
 
 class _Message:
@@ -64,7 +64,7 @@ class _StuckConnection(_RestartableConnection):
 class RouterLifecycleTests(unittest.TestCase):
     def test_router_can_start_stop_and_restart(self) -> None:
         connection = _RestartableConnection()
-        router = MavlinkMessageRouter(
+        router = MavMessageRouter(
             connection,  # type: ignore[arg-type]
             poll_timeout=0.01,
             stop_timeout=0.2,
@@ -85,7 +85,7 @@ class RouterLifecycleTests(unittest.TestCase):
 
     def test_router_keeps_connection_open_when_receive_thread_is_stuck(self) -> None:
         connection = _StuckConnection()
-        router = MavlinkMessageRouter(
+        router = MavMessageRouter(
             connection,  # type: ignore[arg-type]
             poll_timeout=0.01,
             stop_timeout=0.05,
@@ -137,7 +137,7 @@ class _QueuedLoop:
 class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
     async def test_queue_overflow_drops_oldest_and_stop_clears_session(self) -> None:
         router = _RouterStub()
-        channel = MavlinkAsyncChannel(router, maxsize=1)  # type: ignore[arg-type]
+        channel = MavAsyncChannel(router, maxsize=1)  # type: ignore[arg-type]
         channel.start()
 
         first = _Message("A", 1)
@@ -158,7 +158,7 @@ class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
         channel.stop()
 
     async def test_closed_loop_race_is_ignored(self) -> None:
-        channel = MavlinkAsyncChannel(
+        channel = MavAsyncChannel(
             _RouterStub(),  # type: ignore[arg-type]
             loop=_ClosingLoop(),  # type: ignore[arg-type]
         )
@@ -166,7 +166,7 @@ class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_router_side_buffer_is_bounded_before_loop_drain(self) -> None:
         loop = _QueuedLoop()
-        channel = MavlinkAsyncChannel(
+        channel = MavAsyncChannel(
             _RouterStub(),  # type: ignore[arg-type]
             maxsize=4,
             loop=loop,  # type: ignore[arg-type]
@@ -180,7 +180,7 @@ class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.dropped_messages, 96)
 
     async def test_stop_from_another_thread_wakes_receiver_without_queue_race(self) -> None:
-        channel = MavlinkAsyncChannel(_RouterStub())  # type: ignore[arg-type]
+        channel = MavAsyncChannel(_RouterStub())  # type: ignore[arg-type]
         channel.start()
         receiver = asyncio.create_task(channel.receive())
         await asyncio.sleep(0)
@@ -196,9 +196,9 @@ class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
 
 class _ChannelStub:
     def __init__(self) -> None:
-        self.packets = EventBus[MavlinkApplicationPacket]()
+        self.packets = EventBus[MavApplicationPacket]()
         self.errors = EventBus[Exception]()
-        self.sent: list[MavlinkApplicationPacket] = []
+        self.sent: list[MavApplicationPacket] = []
         self.started = False
 
     def start(self) -> None:
@@ -215,8 +215,8 @@ class _ChannelStub:
         packet_id: int | None = None,
         expects_response: bool = False,
         **_targets: Any,
-    ) -> MavlinkApplicationPacket:
-        packet = MavlinkApplicationPacket(
+    ) -> MavApplicationPacket:
+        packet = MavApplicationPacket(
             packet_type,
             dict(payload or {}),
             packet_id=packet_id or len(self.sent) + 1,
@@ -227,8 +227,8 @@ class _ChannelStub:
 
 
 class PeerLifecycleTests(unittest.TestCase):
-    def _peer(self, channel: _ChannelStub, **options: Any) -> MavlinkApplicationPeer:
-        return MavlinkApplicationPeer(
+    def _peer(self, channel: _ChannelStub, **options: Any) -> MavApplicationPeer:
+        return MavApplicationPeer(
             channel,  # type: ignore[arg-type]
             role="onboard",
             heartbeat_interval=0.02,
@@ -307,7 +307,7 @@ class PeerLifecycleTests(unittest.TestCase):
         peer = self._peer(channel)
         peer.start()
         sent = threading.Event()
-        requests: list[MavlinkApplicationPacket] = []
+        requests: list[MavApplicationPacket] = []
         responses: list[Any] = []
 
         def request() -> None:
@@ -324,14 +324,14 @@ class PeerLifecycleTests(unittest.TestCase):
         requester.start()
         self.assertTrue(sent.wait(1.0))
         channel.packets.publish(
-            MavlinkApplicationPacket(
+            MavApplicationPacket(
                 "system.ack",
                 {"request_id": requests[0].packet_id + 1},
             )
         )
         self.assertTrue(requester.is_alive())
         channel.packets.publish(
-            MavlinkApplicationPacket(
+            MavApplicationPacket(
                 "system.ack",
                 {"request_id": requests[0].packet_id, "accepted": True},
             )
@@ -354,7 +354,7 @@ class PeerLifecycleTests(unittest.TestCase):
                 timeout=0.02,
             )
 
-        channel.packets.publish(MavlinkApplicationPacket("system.heartbeat"))
+        channel.packets.publish(MavApplicationPacket("system.heartbeat"))
         self.assertTrue(peer.alive)
         deadline = time.monotonic() + 0.5
         while peer.alive and time.monotonic() < deadline:
@@ -366,7 +366,7 @@ class PeerLifecycleTests(unittest.TestCase):
 
 class _PeerStub:
     def __init__(self) -> None:
-        self.packets = EventBus[MavlinkApplicationPacket]()
+        self.packets = EventBus[MavApplicationPacket]()
         self.sent: list[tuple[str, dict[str, Any]]] = []
 
     def send(self, packet_type: str, payload: Any, **_targets: Any) -> None:
@@ -376,11 +376,11 @@ class _PeerStub:
 class DispatcherLifecycleTests(unittest.TestCase):
     def test_handler_can_stop_dispatcher_without_joining_itself(self) -> None:
         peer = _PeerStub()
-        dispatcher = MavlinkApplicationDispatcher(peer)  # type: ignore[arg-type]
+        dispatcher = MavApplicationDispatcher(peer)  # type: ignore[arg-type]
         finished = threading.Event()
         errors: list[BaseException] = []
 
-        def handler(_packet: MavlinkApplicationPacket) -> dict[str, bool]:
+        def handler(_packet: MavApplicationPacket) -> dict[str, bool]:
             try:
                 dispatcher.stop()
             except BaseException as exc:  # pragma: no cover - asserted below
@@ -393,7 +393,7 @@ class DispatcherLifecycleTests(unittest.TestCase):
         dispatcher.start()
         self.assertTrue(
             dispatcher.dispatch(
-                MavlinkApplicationPacket(
+                MavApplicationPacket(
                     "system.stop",
                     packet_id=99,
                     expects_response=True,
@@ -408,7 +408,7 @@ class DispatcherLifecycleTests(unittest.TestCase):
 
     def test_stop_suppresses_running_handler_response_and_releases_capacity(self) -> None:
         peer = _PeerStub()
-        dispatcher = MavlinkApplicationDispatcher(
+        dispatcher = MavApplicationDispatcher(
             peer,  # type: ignore[arg-type]
             workers=1,
             max_pending=1,
@@ -416,15 +416,15 @@ class DispatcherLifecycleTests(unittest.TestCase):
         entered = threading.Event()
         release = threading.Event()
 
-        def handler(_packet: MavlinkApplicationPacket) -> dict[str, bool]:
+        def handler(_packet: MavApplicationPacket) -> dict[str, bool]:
             entered.set()
             release.wait()
             return {"done": True}
 
         dispatcher.register("camera.capture", handler)
         dispatcher.start()
-        first = MavlinkApplicationPacket("camera.capture", packet_id=101, expects_response=True)
-        second = MavlinkApplicationPacket("camera.capture", packet_id=102, expects_response=True)
+        first = MavApplicationPacket("camera.capture", packet_id=101, expects_response=True)
+        second = MavApplicationPacket("camera.capture", packet_id=102, expects_response=True)
         self.assertTrue(dispatcher.dispatch(first))
         self.assertTrue(entered.wait(1.0))
         self.assertFalse(dispatcher.dispatch(second))
@@ -444,9 +444,7 @@ class DispatcherLifecycleTests(unittest.TestCase):
         dispatcher.start()
         handled = threading.Event()
         dispatcher.handled.subscribe(lambda _result: handled.set())
-        self.assertTrue(
-            dispatcher.dispatch(MavlinkApplicationPacket("camera.capture", packet_id=103))
-        )
+        self.assertTrue(dispatcher.dispatch(MavApplicationPacket("camera.capture", packet_id=103)))
         self.assertTrue(handled.wait(1.0))
         dispatcher.stop()
 

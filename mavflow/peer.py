@@ -10,8 +10,8 @@ from typing import Any
 from eventflow import EventBus, Subscription
 
 from .application import (
-    MavlinkApplicationChannel,
-    MavlinkApplicationPacket,
+    MavApplicationChannel,
+    MavApplicationPacket,
 )
 
 TargetValue = int | Callable[[], int]
@@ -19,7 +19,7 @@ PayloadFactory = Mapping[str, Any] | Callable[[], Mapping[str, Any]]
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkApplicationPeerState:
+class MavApplicationPeerState:
     """Describe one application peer carried by a shared MAVLink transport."""
 
     running: bool = False
@@ -35,11 +35,11 @@ class MavlinkApplicationPeerState:
 
 
 @dataclass(frozen=True, slots=True)
-class MavlinkApplicationResponse:
+class MavApplicationResponse:
     """Pair a request with its correlated application response."""
 
-    request: MavlinkApplicationPacket
-    response: MavlinkApplicationPacket
+    request: MavApplicationPacket
+    response: MavApplicationPacket
     round_trip_ms: float
 
 
@@ -48,16 +48,16 @@ class _PendingRequest:
     event: threading.Event
     response_types: frozenset[str]
     started_monotonic: float
-    response: MavlinkApplicationPacket | None = None
+    response: MavApplicationPacket | None = None
     error: str = ""
 
 
-class MavlinkApplicationPeer:
+class MavApplicationPeer:
     """Manage liveness and correlated messages over one application channel.
 
     The peer owns no serial or network transport. It uses the supplied
-    ``MavlinkApplicationChannel``, which in turn subscribes to the existing
-    ``MavlinkClient`` router. The same class can therefore run on the GCS and
+    ``MavApplicationChannel``, which in turn subscribes to the existing
+    ``MavClient`` router. The same class can therefore run on the GCS and
     the onboard computer without creating a second MAVLink reader.
     """
 
@@ -65,7 +65,7 @@ class MavlinkApplicationPeer:
 
     def __init__(
         self,
-        channel: MavlinkApplicationChannel,
+        channel: MavApplicationChannel,
         *,
         role: str,
         target_system: TargetValue = 0,
@@ -95,7 +95,7 @@ class MavlinkApplicationPeer:
         self._heartbeat_interval = float(heartbeat_interval)
         self._heartbeat_timeout = float(heartbeat_timeout)
         self._stop_timeout = float(stop_timeout)
-        self._state = MavlinkApplicationPeerState()
+        self._state = MavApplicationPeerState()
         self._pending: dict[int, _PendingRequest] = {}
         self._probes: dict[int, float] = {}
         self._last_liveness_monotonic = 0.0
@@ -105,12 +105,12 @@ class MavlinkApplicationPeer:
         self._wake = threading.Event()
         self._monitor_thread: threading.Thread | None = None
 
-        self.packets = EventBus[MavlinkApplicationPacket]()
-        self.changed = EventBus[MavlinkApplicationPeerState]()
+        self.packets = EventBus[MavApplicationPacket]()
+        self.changed = EventBus[MavApplicationPeerState]()
         self.errors = EventBus[Exception]()
 
     @property
-    def state(self) -> MavlinkApplicationPeerState:
+    def state(self) -> MavApplicationPeerState:
         with self._lock:
             return replace(self._state)
 
@@ -154,7 +154,7 @@ class MavlinkApplicationPeer:
         self._wake.clear()
         self._monitor_thread = threading.Thread(
             target=self._monitor,
-            name=f"MavlinkApplicationPeer[{self._role}]",
+            name=f"MavApplicationPeer[{self._role}]",
             daemon=True,
         )
         self._monitor_thread.start()
@@ -219,7 +219,7 @@ class MavlinkApplicationPeer:
         target_system: int | None = None,
         target_component: int | None = None,
         expects_response: bool = False,
-    ) -> MavlinkApplicationPacket:
+    ) -> MavApplicationPacket:
         with self._lock:
             if not self._state.running:
                 raise ConnectionError("MAVLink application peer is not running")
@@ -264,8 +264,8 @@ class MavlinkApplicationPeer:
         timeout: float,
         target_system: int | None = None,
         target_component: int | None = None,
-        on_sent: Callable[[MavlinkApplicationPacket], None] | None = None,
-    ) -> MavlinkApplicationResponse:
+        on_sent: Callable[[MavApplicationPacket], None] | None = None,
+    ) -> MavApplicationResponse:
         """Send a request and wait only for a response with its request ID."""
 
         if timeout <= 0:
@@ -302,7 +302,7 @@ class MavlinkApplicationPeer:
             response = pending.response
             if response is None:
                 raise TimeoutError("MAVLink application response was empty")
-            return MavlinkApplicationResponse(
+            return MavApplicationResponse(
                 request,
                 response,
                 max(0.0, (time.monotonic() - pending.started_monotonic) * 1000.0),
@@ -311,7 +311,7 @@ class MavlinkApplicationPeer:
             with self._lock:
                 self._pending.pop(packet_id, None)
 
-    def probe(self) -> MavlinkApplicationPacket:
+    def probe(self) -> MavApplicationPacket:
         """Send one status-bearing liveness probe and measure its round trip."""
 
         probe_payload = dict(self._payload())
@@ -331,7 +331,7 @@ class MavlinkApplicationPeer:
                 self._probes.pop(probe_id, None)
             raise
 
-    def _on_packet(self, packet: MavlinkApplicationPacket) -> None:
+    def _on_packet(self, packet: MavApplicationPacket) -> None:
         now_monotonic = time.monotonic()
         now_epoch = time.time()
         response_to = self._response_request_id(packet)
@@ -529,7 +529,7 @@ class MavlinkApplicationPeer:
         return normalized
 
     @staticmethod
-    def _response_request_id(packet: MavlinkApplicationPacket) -> int | None:
+    def _response_request_id(packet: MavApplicationPacket) -> int | None:
         value = packet.payload.get("request_id")
         try:
             return int(value) if value is not None else None
