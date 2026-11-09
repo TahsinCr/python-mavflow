@@ -8,7 +8,6 @@ from typing import Any
 from eventflow import EventBus
 
 from .endpoint import MavEndpoint
-from .filter import MessageTypeInput, normalize_message_types
 
 ConnectionFactory = Callable[[MavEndpoint], Any]
 
@@ -148,7 +147,7 @@ class MavConnection:
     def receive(
         self,
         *,
-        message_types: MessageTypeInput | None = None,
+        message_types: str | list[str] | set[str] | None = None,
         condition: str | None = None,
         blocking: bool = False,
         timeout: float | None = None,
@@ -158,18 +157,10 @@ class MavConnection:
         Do not call this directly while the router is running; the router must
         remain the only reader.
         """
-        normalized_types = normalize_message_types(message_types)
-        native_types: str | list[str] | None
-        if normalized_types is None:
-            native_types = None
-        elif len(normalized_types) == 1:
-            native_types = next(iter(normalized_types))
-        else:
-            native_types = sorted(normalized_types)
         normalized_condition = condition.strip() if condition else None
         kwargs: dict[str, Any] = {"blocking": blocking, "timeout": timeout}
-        if native_types is not None:
-            kwargs["type"] = native_types
+        if message_types is not None:
+            kwargs["type"] = message_types
         if normalized_condition:
             kwargs["condition"] = normalized_condition
         try:

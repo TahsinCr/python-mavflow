@@ -1,17 +1,16 @@
 from __future__ import annotations
 
-import asyncio
 import queue
 import threading
 import time
 import unittest
 from typing import Any
 
-from eventflow import EventBus
+from eventflow import AsyncEventQueue, EventBus
 
 from mavflow.application import MavApplicationPacket
-from mavflow.channel import MavAsyncChannel
 from mavflow.dispatch import MavApplicationDispatcher
+from mavflow.message import MavMessageEnvelope
 from mavflow.peer import MavApplicationPeer
 from mavflow.router import MavMessageRouter
 
@@ -74,11 +73,21 @@ class RouterLifecycleTests(unittest.TestCase):
         router.stop()
         router.start()
         boundary = router.sequence
-        connection.inbox.put(_Message("HEARTBEAT", 9))
-        message = router.wait_for("HEARTBEAT", timeout=1.0, after_sequence=boundary)
+        publication = threading.Timer(
+            0.01,
+            lambda: connection.inbox.put(_Message("HEARTBEAT", 9)),
+        )
+        publication.start()
+        envelope = router.messages.wait_for(
+            routing_key="HEARTBEAT",
+            predicate=lambda item: item.sequence > boundary,
+            timeout=1.0,
+        )
+        publication.join(timeout=1.0)
         router.stop()
 
-        self.assertEqual(message.value, 9)
+        self.assertIsNotNone(envelope)
+        self.assertEqual(envelope.message.value, 9)
         self.assertEqual(connection.start_count, 2)
         self.assertEqual(connection.stop_count, 2)
         self.assertFalse(router.running)
@@ -107,91 +116,27 @@ class RouterLifecycleTests(unittest.TestCase):
         self.assertFalse(router.running)
 
 
-class _RouterStub:
-    def __init__(self) -> None:
-        self.messages = EventBus[Any]()
-
-    def subscribe(self, callback: Any, _message_filter: Any = None) -> Any:
-        return self.messages.subscribe(callback)
-
-
-class _ClosingLoop:
-    def is_closed(self) -> bool:
-        return False
-
-    def call_soon_threadsafe(self, _callback: Any, *_args: Any) -> None:
-        raise RuntimeError("event loop closed during scheduling")
-
-
-class _QueuedLoop:
-    def __init__(self) -> None:
-        self.callbacks: list[tuple[Any, tuple[Any, ...]]] = []
-
-    def is_closed(self) -> bool:
-        return False
-
-    def call_soon_threadsafe(self, callback: Any, *args: Any) -> None:
-        self.callbacks.append((callback, args))
-
-
-class AsyncChannelTests(unittest.IsolatedAsyncioTestCase):
-    async def test_queue_overflow_drops_oldest_and_stop_clears_session(self) -> None:
-        router = _RouterStub()
-        channel = MavAsyncChannel(router, maxsize=1)  # type: ignore[arg-type]
-        channel.start()
-
-        first = _Message("A", 1)
-        second = _Message("A", 2)
-        router.messages.publish(first)
-        router.messages.publish(second)
-        await asyncio.sleep(0)
-
-        self.assertEqual(channel.dropped_messages, 1)
-        self.assertIs(channel.receive_nowait(), second)
-
-        router.messages.publish(first)
-        await asyncio.sleep(0)
-        channel.stop()
-        channel.start()
-        with self.assertRaises(asyncio.TimeoutError):
-            await channel.receive(timeout=0.01)
-        channel.stop()
-
-    async def test_closed_loop_race_is_ignored(self) -> None:
-        channel = MavAsyncChannel(
-            _RouterStub(),  # type: ignore[arg-type]
-            loop=_ClosingLoop(),  # type: ignore[arg-type]
+class AsyncEventQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_eventflow_queue_filters_router_envelopes_before_capacity(self) -> None:
+        router = MavMessageRouter(_RestartableConnection())  # type: ignore[arg-type]
+        queue = AsyncEventQueue(
+            router.messages,
+            routing_key="HEARTBEAT",
+            capacity=1,
+            overflow="drop_oldest",
         )
-        channel._forward(_Message("HEARTBEAT"))
+        try:
+            router.messages.publish(MavMessageEnvelope.wrap(1, _Message("HEARTBEAT", 1)))
+            router.messages.publish(MavMessageEnvelope.wrap(2, _Message("ATTITUDE", 0)))
+            router.messages.publish(MavMessageEnvelope.wrap(3, _Message("HEARTBEAT", 2)))
 
-    async def test_router_side_buffer_is_bounded_before_loop_drain(self) -> None:
-        loop = _QueuedLoop()
-        channel = MavAsyncChannel(
-            _RouterStub(),  # type: ignore[arg-type]
-            maxsize=4,
-            loop=loop,  # type: ignore[arg-type]
-        )
-
-        for value in range(100):
-            channel._forward(_Message("ATTITUDE", value))
-
-        self.assertEqual(len(loop.callbacks), 1)
-        self.assertEqual(channel.pending_messages, 4)
-        self.assertEqual(channel.dropped_messages, 96)
-
-    async def test_stop_from_another_thread_wakes_receiver_without_queue_race(self) -> None:
-        channel = MavAsyncChannel(_RouterStub())  # type: ignore[arg-type]
-        channel.start()
-        receiver = asyncio.create_task(channel.receive())
-        await asyncio.sleep(0)
-
-        stopper = threading.Thread(target=channel.stop)
-        stopper.start()
-        stopper.join(1.0)
-
-        with self.assertRaisesRegex(RuntimeError, "çalışmıyor"):
-            await asyncio.wait_for(receiver, 1.0)
-        self.assertEqual(channel.pending_messages, 0)
+            received = await queue.receive()
+            self.assertEqual(received.message.value, 2)
+            self.assertEqual(queue.stats().dropped, 1)
+        finally:
+            await queue.aclose()
+            router.messages.close()
+            router.errors.close()
 
 
 class _ChannelStub:
@@ -406,7 +351,7 @@ class DispatcherLifecycleTests(unittest.TestCase):
         self.assertFalse(dispatcher.running)
         self.assertFalse(peer.sent)
 
-    def test_stop_suppresses_running_handler_response_and_releases_capacity(self) -> None:
+    def test_stop_suppresses_running_handler_and_cancels_pending_work(self) -> None:
         peer = _PeerStub()
         dispatcher = MavApplicationDispatcher(
             peer,  # type: ignore[arg-type]
@@ -425,9 +370,11 @@ class DispatcherLifecycleTests(unittest.TestCase):
         dispatcher.start()
         first = MavApplicationPacket("camera.capture", packet_id=101, expects_response=True)
         second = MavApplicationPacket("camera.capture", packet_id=102, expects_response=True)
+        third = MavApplicationPacket("camera.capture", packet_id=103, expects_response=True)
         self.assertTrue(dispatcher.dispatch(first))
         self.assertTrue(entered.wait(1.0))
-        self.assertFalse(dispatcher.dispatch(second))
+        self.assertTrue(dispatcher.dispatch(second))
+        self.assertFalse(dispatcher.dispatch(third))
 
         stopper = threading.Thread(target=dispatcher.stop)
         stopper.start()
@@ -438,13 +385,14 @@ class DispatcherLifecycleTests(unittest.TestCase):
 
         self.assertFalse(stopper.is_alive())
         response_ids = [payload["request_id"] for _, payload in peer.sent]
-        self.assertIn(102, response_ids)
+        self.assertIn(103, response_ids)
         self.assertNotIn(101, response_ids)
+        self.assertNotIn(102, response_ids)
 
         dispatcher.start()
         handled = threading.Event()
         dispatcher.handled.subscribe(lambda _result: handled.set())
-        self.assertTrue(dispatcher.dispatch(MavApplicationPacket("camera.capture", packet_id=103)))
+        self.assertTrue(dispatcher.dispatch(MavApplicationPacket("camera.capture", packet_id=104)))
         self.assertTrue(handled.wait(1.0))
         dispatcher.stop()
 

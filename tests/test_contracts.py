@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import math
 import queue
+import threading
 import unittest
 from typing import Any
 
+from eventflow import EventFilter
+
 from mavflow.connection import MavConnection
 from mavflow.endpoint import MavEndpoint
-from mavflow.filter import MavMessageFilter
+from mavflow.message import MavMessageEnvelope
 from mavflow.remote_log import (
     REMOTE_LOG_MAX_DETAILS_BYTES,
     MavRemoteLogBatch,
@@ -72,37 +75,6 @@ class _RichMessage:
 
     def get_seq(self) -> int:
         return self._header.seq
-
-
-class MessageFilterTests(unittest.TestCase):
-    def test_composite_filter_matches_all_metadata_and_predicate_fields(self) -> None:
-        message = _RichMessage(
-            "GLOBAL_POSITION_INT",
-            message_id=33,
-            system=4,
-            component=1,
-            value=9,
-        )
-        message_filter = MavMessageFilter(
-            message_types=["heartbeat", "global_position_int"],
-            message_ids=[0, 33],
-            source_systems=4,
-            source_components=(1, 191),
-            condition="GLOBAL_POSITION_INT.relative_alt > 0",
-            predicate=lambda item: item.value == 9,
-        )
-
-        self.assertTrue(message_filter.matches(message, condition_evaluator=lambda _value: True))
-        self.assertFalse(message_filter.matches(message, condition_evaluator=lambda _value: False))
-        self.assertFalse(MavMessageFilter.for_types("HEARTBEAT").matches(message))
-
-    def test_filter_validates_empty_and_out_of_range_criteria(self) -> None:
-        with self.assertRaises(ValueError):
-            MavMessageFilter(message_types=[])
-        with self.assertRaises(ValueError):
-            MavMessageFilter(source_systems=256)
-        with self.assertRaises(TypeError):
-            MavMessageFilter(predicate="not callable")  # type: ignore[arg-type]
 
 
 class _MavSender:
@@ -180,7 +152,7 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(connection.evaluate_condition("HEARTBEAT"))
         self.assertEqual(
             connection.receive(
-                message_types=["heartbeat", "global_position_int"],
+                message_types=["HEARTBEAT", "GLOBAL_POSITION_INT"],
                 condition=" HEARTBEAT ",
                 blocking=True,
                 timeout=0.5,
@@ -192,7 +164,7 @@ class ConnectionTests(unittest.TestCase):
             {
                 "blocking": True,
                 "timeout": 0.5,
-                "type": ["GLOBAL_POSITION_INT", "HEARTBEAT"],
+                "type": ["HEARTBEAT", "GLOBAL_POSITION_INT"],
                 "condition": "HEARTBEAT",
             },
         )
@@ -261,21 +233,18 @@ class _RouterConnection:
 
 
 class RouterContractTests(unittest.TestCase):
-    def test_router_filters_history_latest_and_wait_timeout(self) -> None:
+    def test_router_publishes_keyed_envelopes_with_eventflow_history(self) -> None:
         connection = _RouterConnection()
         router = MavMessageRouter(
             connection,  # type: ignore[arg-type]
             poll_timeout=0.01,
             stop_timeout=0.2,
         )
-        received: list[int] = []
-        router.subscribe(
-            lambda message: received.append(message.value),
-            MavMessageFilter(
-                message_types="HEARTBEAT",
-                source_systems=3,
-                condition="ready",
-            ),
+        received: list[MavMessageEnvelope] = []
+        router.messages.subscribe(
+            received.append,
+            routing_key="HEARTBEAT",
+            predicate=lambda envelope: envelope.source_system == 3,
         )
         router.start()
         connection.inbox.put(
@@ -284,17 +253,33 @@ class RouterContractTests(unittest.TestCase):
         connection.inbox.put(
             _RichMessage("HEARTBEAT", message_id=0, system=3, component=1, value=2)
         )
-        matched = router.wait_for(
-            MavMessageFilter(message_types="HEARTBEAT", source_systems=3),
-            timeout=1.0,
+        waiter = threading.Timer(
+            0.01,
+            lambda: router.messages.publish(
+                MavMessageEnvelope.wrap(
+                    3,
+                    _RichMessage("ATTITUDE", message_id=30, system=3, component=1, value=4),
+                )
+            ),
         )
+        waiter.start()
+        matched = router.messages.wait_for(routing_key="ATTITUDE", timeout=1.0)
+        waiter.join(timeout=1.0)
+        history = router.messages.history
+        self.assertIsNotNone(history)
 
-        self.assertEqual(matched.value, 2)
-        self.assertEqual(received, [2])
-        self.assertEqual(router.latest("HEARTBEAT").value, 2)
-        self.assertEqual(len(router.history("HEARTBEAT")), 2)
-        with self.assertRaises(TimeoutError):
-            router.wait_for("ATTITUDE", timeout=0.02)
+        self.assertIsNotNone(matched)
+        self.assertEqual(matched.message.value, 4)
+        self.assertEqual([envelope.message.value for envelope in received], [2])
+        heartbeat_filter = EventFilter(
+            predicate=lambda envelope: envelope.message_type == "HEARTBEAT"
+        )
+        latest = history.latest(heartbeat_filter)
+        self.assertIsNotNone(latest)
+        self.assertEqual(latest.message.value, 2)
+        self.assertEqual(len(history.query(heartbeat_filter)), 2)
+        self.assertIsNone(router.messages.wait_for(routing_key="UNKNOWN", timeout=0.02))
+        self.assertFalse(waiter.is_alive())
         router.stop()
 
 

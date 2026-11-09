@@ -17,15 +17,9 @@ from .dispatch import (
     MavApplicationHandler,
 )
 from .endpoint import MavEndpoint
-from .filter import MavMessageFilter, MessagePredicate, MessageTypeInput
+from .message import MavMessageEnvelope
 from .peer import MavApplicationPeer, MavApplicationResponse
 from .router import MavRouterStats
-
-
-@dataclass(frozen=True, slots=True)
-class MavRuntimeError:
-    source: str
-    error: Exception
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,13 +85,23 @@ class MavRuntime:
             else None
         )
 
-        self.errors = EventBus[MavRuntimeError](history=100)
-        self._error_subscriptions: list[Subscription] = []
+        self.events = self.client.events
+        if self.channel is not None:
+            self.events.add("mavlink.application.errors", self.channel.errors)
+        if self.peer is not None:
+            self.events.add("mavlink.application.packets", self.peer.packets)
+            self.events.add("mavlink.peer.changed", self.peer.changed)
+            self.events.add("mavlink.peer.errors", self.peer.errors)
+        elif self.channel is not None:
+            self.events.add("mavlink.application.packets", self.channel.packets)
+        if self.dispatcher is not None:
+            self.events.add("mavlink.dispatcher.handled", self.dispatcher.handled)
+            self.events.add("mavlink.dispatcher.unhandled", self.dispatcher.unhandled)
+            self.events.add("mavlink.dispatcher.errors", self.dispatcher.errors)
         self._running = False
         self._cleanup_pending = False
         self._closed = False
         self._lock = threading.RLock()
-        self._bridge_errors()
 
     @property
     def running(self) -> bool:
@@ -109,14 +113,16 @@ class MavRuntime:
         return self.peer is not None and self.dispatcher is not None
 
     @property
-    def messages(self) -> EventBus[Any]:
+    def messages(self) -> EventBus[MavMessageEnvelope]:
         return self.router.messages
 
     @property
     def packets(self) -> EventBus[MavApplicationPacket]:
-        if self.peer is None:
-            raise RuntimeError("MAVLink application channel is not configured")
-        return self.peer.packets
+        if self.peer is not None:
+            return self.peer.packets
+        if self.channel is not None:
+            return self.channel.packets
+        raise RuntimeError("MAVLink application channel is not configured")
 
     @property
     def state(self) -> MavRuntimeState:
@@ -151,15 +157,13 @@ class MavRuntime:
             if self.dispatcher is not None:
                 self.dispatcher.start()
                 started_stops.append(self.dispatcher.stop)
-        except Exception as exc:
-            self._publish_error("start", exc)
+        except Exception:
             cleanup_failed = False
             for stop_component in reversed(started_stops):
                 try:
                     stop_component()
-                except Exception as stop_error:
+                except Exception:
                     cleanup_failed = True
-                    self._publish_error("rollback", stop_error)
             with self._lock:
                 self._cleanup_pending = cleanup_failed
             raise
@@ -189,106 +193,34 @@ class MavRuntime:
                 stop_component()
             except Exception as exc:
                 errors.append(exc)
-                self._publish_error("stop", exc)
         if errors:
             raise ExceptionGroup("MAVLink runtime shutdown failed", errors)
         with self._lock:
             self._cleanup_pending = False
 
     def close(self) -> None:
-        """Stop owned services and permanently release runtime subscriptions."""
+        """Stop owned services and close the EventFlow channel engine."""
 
         with self._lock:
             if self._closed:
                 return
-        self.stop()
+        errors: list[Exception] = []
+        try:
+            self.stop()
+        except Exception as exc:
+            errors.append(exc)
+        try:
+            self.events.stop()
+        except Exception as exc:
+            errors.append(exc)
         with self._lock:
             self._closed = True
-            subscriptions = tuple(self._error_subscriptions)
-            self._error_subscriptions.clear()
-        for subscription in subscriptions:
-            subscription.cancel()
-        self.errors.close()
+        if errors:
+            raise ExceptionGroup("MAVLink runtime close failed", errors)
 
     def reconnect(self) -> None:
         self.stop()
         self.start()
-
-    def subscribe(
-        self,
-        message_types: MavMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], None],
-        *,
-        predicate: MessagePredicate | None = None,
-    ) -> Subscription:
-        message_filter = (
-            message_types
-            if isinstance(message_types, MavMessageFilter)
-            else MavMessageFilter(
-                message_types=message_types,
-                predicate=predicate,
-            )
-        )
-        if isinstance(message_types, MavMessageFilter) and predicate is not None:
-            raise ValueError("Use a MavMessageFilter or predicate, not both")
-        return self.client.subscribe(callback, message_filter)
-
-    on = subscribe
-
-    def once(
-        self,
-        message_types: MavMessageFilter | MessageTypeInput,
-        callback: Callable[[Any], None],
-        *,
-        predicate: MessagePredicate | None = None,
-    ) -> Subscription:
-        """Handle the first matching MAVLink message and then unsubscribe."""
-
-        lock = threading.Lock()
-        subscription: Subscription | None = None
-        consumed = False
-
-        def receive(message: Any) -> None:
-            nonlocal consumed
-            with lock:
-                if consumed:
-                    return
-                consumed = True
-                current = subscription
-            if current is not None:
-                current.cancel()
-            callback(message)
-
-        subscription = self.subscribe(
-            message_types,
-            receive,
-            predicate=predicate,
-        )
-        with lock:
-            if consumed:
-                subscription.cancel()
-        return subscription
-
-    def wait_for(
-        self,
-        message_types: MavMessageFilter | MessageTypeInput,
-        *,
-        predicate: MessagePredicate | None = None,
-        timeout: float = 3.0,
-        after_sequence: int | None = None,
-    ) -> Any:
-        return self.client.wait_for(
-            message_types,
-            predicate=predicate,
-            timeout=timeout,
-            after_sequence=after_sequence,
-        )
-
-    def latest(
-        self,
-        message_filter: MavMessageFilter | MessageTypeInput | None = None,
-    ) -> Any | None:
-        return self.client.latest(message_filter)
 
     def send(self, message: Any) -> None:
         self.client.send(message)
@@ -335,27 +267,6 @@ class MavRuntime:
             response_types=response_types,
             timeout=timeout,
         )
-
-    def _bridge_errors(self) -> None:
-        sources = (
-            ("connection", getattr(self.connection, "errors", None)),
-            ("router", getattr(self.router, "errors", None)),
-            ("channel", getattr(self.channel, "errors", None)),
-            ("peer", getattr(self.peer, "errors", None)),
-            ("dispatcher", getattr(self.dispatcher, "errors", None)),
-        )
-        for name, events in sources:
-            if events is None:
-                continue
-            self._error_subscriptions.append(
-                events.subscribe(lambda error, source=name: self._publish_error(source, error))
-            )
-
-    def _publish_error(self, source: str, error: Any) -> None:
-        if not isinstance(error, Exception):
-            error = getattr(error, "error", RuntimeError(str(error)))
-        if not self.errors.closed:
-            self.errors.publish(MavRuntimeError(source, error))
 
     def __enter__(self) -> MavRuntime:
         self.start()

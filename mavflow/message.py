@@ -2,14 +2,7 @@ from __future__ import annotations
 
 import time
 from dataclasses import dataclass
-from typing import Any
-
-from .filter import (
-    mavlink_message_id,
-    mavlink_message_type,
-    mavlink_source_component,
-    mavlink_source_system,
-)
+from typing import Any, cast
 
 
 @dataclass(frozen=True, slots=True)
@@ -26,13 +19,37 @@ class MavMessageEnvelope:
 
     @classmethod
     def wrap(cls, sequence: int, message: Any) -> MavMessageEnvelope:
+        get_type = getattr(message, "get_type", None)
+        if not callable(get_type):
+            raise TypeError("MAVLink mesajı get_type() sağlamalı")
+        message_type = str(get_type()).strip().upper()
+        if not message_type:
+            raise ValueError("MAVLink mesaj tipi boş olamaz")
+
+        header = getattr(message, "_header", None)
+        get_source_system = getattr(message, "get_srcSystem", None)
+        source_system = (
+            get_source_system()
+            if callable(get_source_system)
+            else getattr(header, "srcSystem", None)
+        )
+        get_source_component = getattr(message, "get_srcComponent", None)
+        source_component = (
+            get_source_component()
+            if callable(get_source_component)
+            else getattr(header, "srcComponent", None)
+        )
+        get_message_id = getattr(message, "get_msgId", None)
+        message_id = get_message_id() if callable(get_message_id) else None
         return cls(
             sequence=sequence,
             message=message,
-            message_type=mavlink_message_type(message),
-            source_system=mavlink_source_system(message),
-            source_component=mavlink_source_component(message),
-            message_id=mavlink_message_id(message),
+            message_type=message_type,
+            source_system=int(cast(Any, source_system)) if source_system is not None else None,
+            source_component=(
+                int(cast(Any, source_component)) if source_component is not None else None
+            ),
+            message_id=int(cast(Any, message_id)) if message_id is not None else None,
             received_monotonic=time.monotonic(),
         )
 

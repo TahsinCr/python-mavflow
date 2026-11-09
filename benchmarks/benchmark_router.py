@@ -62,13 +62,13 @@ def _sample(messages_per_batch: int) -> float:
     delivered = 0
     completed = threading.Event()
 
-    def receive(_message: object) -> None:
+    def receive(_envelope: object) -> None:
         nonlocal delivered
         delivered += 1
         if delivered == messages_per_batch:
             completed.set()
 
-    router.subscribe(receive, "HEARTBEAT")
+    router.messages.subscribe(receive, routing_key="HEARTBEAT")
     router.start()
     started = time.perf_counter()
     release.set()

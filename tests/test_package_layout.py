@@ -3,6 +3,7 @@ from __future__ import annotations
 import unittest
 
 from eventflow import EventBus
+from eventflow.engine import EventEngine
 
 import mavflow
 from mavflow import MavRuntime
@@ -11,9 +12,11 @@ from mavflow.contracts import MavHeader, MavMessage
 
 class PackageLayoutTests(unittest.TestCase):
     def test_public_package_identity_and_runtime_exports(self) -> None:
-        self.assertEqual(mavflow.__version__, "1.0")
+        self.assertEqual(mavflow.__version__, "2.0")
         self.assertIn("MavRuntime", mavflow.__all__)
         self.assertIs(mavflow.MavRuntime, MavRuntime)
+        for removed in ("MavAsyncChannel", "MavMessageFilter", "MessageCache", "MavRuntimeError"):
+            self.assertNotIn(removed, mavflow.__all__)
 
     def test_public_contracts_are_exported_from_contracts_module(self) -> None:
         self.assertIs(mavflow.MavHeader, MavHeader)
@@ -23,7 +26,10 @@ class PackageLayoutTests(unittest.TestCase):
         runtime = MavRuntime()
         try:
             self.assertIsInstance(runtime.messages, EventBus)
-            self.assertIsInstance(runtime.errors, EventBus)
+            self.assertIsInstance(runtime.events, EventEngine)
+            self.assertIn("mavlink.messages", runtime.events.channel_names)
+            self.assertIn("mavlink.connection.errors", runtime.events.channel_names)
+            self.assertFalse(hasattr(runtime, "errors"))
         finally:
             runtime.close()
 

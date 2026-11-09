@@ -16,11 +16,7 @@ from typing import Any
 from eventflow import EventBus, Subscription
 
 from .client import MavClient
-from .filter import (
-    MavMessageFilter,
-    mavlink_source_component,
-    mavlink_source_system,
-)
+from .message import MavMessageEnvelope
 
 V2_EXTENSION_PAYLOAD_SIZE = 249
 DEFAULT_APPLICATION_NETWORK = 77
@@ -44,6 +40,19 @@ def _normalize_source_id(value: int | None, name: str) -> int | None:
         return None
     normalized = int(value)
     if not 0 <= normalized <= 255:
+        raise ValueError(f"{name} 0..255 aralığında olmalı")
+    return normalized
+
+
+def _normalize_source_ids(
+    values: int | tuple[int, ...] | None,
+    name: str,
+) -> frozenset[int] | None:
+    if values is None:
+        return None
+    candidates = values if isinstance(values, tuple) else (values,)
+    normalized = frozenset(int(value) for value in candidates)
+    if any(not 0 <= value <= 255 for value in normalized):
         raise ValueError(f"{name} 0..255 aralığında olmalı")
     return normalized
 
@@ -432,8 +441,8 @@ class MavApplicationChannel:
             max_inflight_bytes=max_inflight_bytes,
             max_completed_packets=max_completed_packets,
         )
-        self._source_systems = source_systems
-        self._source_components = source_components
+        self._source_systems = _normalize_source_ids(source_systems, "source_systems")
+        self._source_components = _normalize_source_ids(source_components, "source_components")
         self._subscription: Subscription | None = None
         self._lock = threading.RLock()
 
@@ -446,14 +455,10 @@ class MavApplicationChannel:
         with self._lock:
             if self._subscription is not None:
                 return
-            self._subscription = self._client.subscribe(
+            self._subscription = self._client.messages.subscribe(
                 self._on_message,
-                MavMessageFilter.for_types(
-                    "V2_EXTENSION",
-                    source_systems=self._source_systems,
-                    source_components=self._source_components,
-                    predicate=self._matches_channel,
-                ),
+                routing_key="V2_EXTENSION",
+                predicate=self._matches_channel,
             )
 
     def stop(self) -> None:
@@ -496,8 +501,19 @@ class MavApplicationChannel:
             )
         return packet
 
-    def _matches_channel(self, message: Any) -> bool:
+    def _matches_channel(self, envelope: MavMessageEnvelope) -> bool:
+        message = envelope.message
         try:
+            if (
+                self._source_systems is not None
+                and envelope.source_system not in self._source_systems
+            ):
+                return False
+            if (
+                self._source_components is not None
+                and envelope.source_component not in self._source_components
+            ):
+                return False
             if int(message.target_network) != self.network_id:
                 return False
             if int(message.message_type) != self.message_type:
@@ -508,12 +524,13 @@ class MavApplicationChannel:
         except (AttributeError, TypeError, ValueError):
             return False
 
-    def _on_message(self, message: Any) -> None:
+    def _on_message(self, envelope: MavMessageEnvelope) -> None:
+        message = envelope.message
         try:
             packet = self._assembler.accept(
                 message.payload,
-                source_system=mavlink_source_system(message),
-                source_component=mavlink_source_component(message),
+                source_system=envelope.source_system,
+                source_component=envelope.source_component,
             )
         except Exception as exc:
             self.errors.publish(exc)

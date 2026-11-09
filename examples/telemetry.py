@@ -15,13 +15,18 @@ def main() -> None:
     args = parser.parse_args()
 
     endpoint = MavEndpoint.udp(args.host, args.port)
-    with MavRuntime(endpoint) as link:
-        subscription = link.subscribe("HEARTBEAT", print)
-        try:
-            first = link.wait_for("HEARTBEAT", timeout=args.timeout)
-            print("First heartbeat:", first)
-        finally:
-            subscription.cancel()
+    runtime = MavRuntime(endpoint)
+    subscription = runtime.messages.subscribe(
+        lambda envelope: print(envelope.message),
+        routing_key="HEARTBEAT",
+    )
+    try:
+        runtime.start()
+        first = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=args.timeout)
+        print("First heartbeat:", first.message if first is not None else None)
+    finally:
+        subscription.cancel()
+        runtime.close()
 
 
 if __name__ == "__main__":

@@ -5,7 +5,7 @@ from __future__ import annotations
 import argparse
 import time
 
-from mavflow import MavEndpoint, MavMessageFilter, MavRuntime
+from mavflow import MavEndpoint, MavMessageEnvelope, MavRuntime
 
 
 def main() -> int:
@@ -26,23 +26,36 @@ def main() -> int:
     if args.seconds < 0:
         parser.error("--seconds cannot be negative")
 
-    message_filter = MavMessageFilter.for_types(
-        "GLOBAL_POSITION_INT",
-        "ATTITUDE",
-        source_systems=args.system,
-    )
     endpoint = MavEndpoint.udp(args.host, args.port)
-    with MavRuntime(endpoint) as runtime:
-        subscription = runtime.subscribe(message_filter, print)
-        try:
-            heartbeat = runtime.wait_for("HEARTBEAT", timeout=args.timeout)
-            if heartbeat is None:
-                print(f"No heartbeat received from system {args.system}")
-                return 1
-            print(f"Listening to system {args.system} for {args.seconds:g}s (Ctrl+C to stop)")
-            time.sleep(args.seconds)
-        finally:
+    runtime = MavRuntime(endpoint)
+
+    def predicate(envelope: MavMessageEnvelope) -> bool:
+        return envelope.source_system == args.system
+
+    subscriptions = [
+        runtime.messages.subscribe(
+            lambda envelope: print(envelope.message),
+            routing_key=message_type,
+            predicate=predicate,
+        )
+        for message_type in ("GLOBAL_POSITION_INT", "ATTITUDE")
+    ]
+    try:
+        runtime.start()
+        heartbeat = runtime.messages.wait_for(
+            routing_key="HEARTBEAT",
+            predicate=predicate,
+            timeout=args.timeout,
+        )
+        if heartbeat is None:
+            print(f"No heartbeat received from system {args.system}")
+            return 1
+        print(f"Listening to system {args.system} for {args.seconds:g}s (Ctrl+C to stop)")
+        time.sleep(args.seconds)
+    finally:
+        for subscription in subscriptions:
             subscription.cancel()
+        runtime.close()
     return 0
 
 

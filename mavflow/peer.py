@@ -105,7 +105,7 @@ class MavApplicationPeer:
         self._wake = threading.Event()
         self._monitor_thread: threading.Thread | None = None
 
-        self.packets = EventBus[MavApplicationPacket]()
+        self.packets = channel.packets
         self.changed = EventBus[MavApplicationPeerState]()
         self.errors = EventBus[Exception]()
 
@@ -367,7 +367,6 @@ class MavApplicationPeer:
             state = replace(self._state)
 
         self.changed.publish(state)
-        self.packets.publish(packet)
         if packet.packet_type == "system.ping":
             try:
                 response_payload = dict(self._payload())

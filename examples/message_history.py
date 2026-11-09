@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import argparse
 
+from eventflow import EventFilter
+
 from mavflow import MavEndpoint, MavRuntime
 
 
@@ -26,16 +28,26 @@ def main() -> int:
 
     endpoint = MavEndpoint.udp(args.host, args.port)
     with MavRuntime(endpoint) as runtime:
-        message = runtime.wait_for(args.message_type, timeout=args.timeout)
-        if message is None:
+        envelope = runtime.messages.wait_for(
+            routing_key=args.message_type.upper(),
+            timeout=args.timeout,
+        )
+        if envelope is None:
             print(f"No {args.message_type} message received before the timeout")
             return 1
 
-        print("First matching message:", message)
-        print("Most recent:", runtime.latest(args.message_type))
+        message_filter = EventFilter(
+            predicate=lambda item: item.message_type == args.message_type.upper()
+        )
+        history = runtime.messages.history
+        if history is None:
+            raise RuntimeError("MAVLink message history is not configured")
+        most_recent = history.latest(message_filter)
+        print("First matching message:", envelope.message)
+        print("Most recent:", most_recent.message if most_recent is not None else None)
         print(f"Recent {args.message_type} history:")
-        for entry in runtime.router.history(args.message_type, limit=args.limit):
-            print(entry)
+        for entry in history.query(message_filter, limit=args.limit):
+            print(entry.message)
         print("Router stats:", runtime.state.router)
     return 0
 

@@ -1,13 +1,12 @@
 from __future__ import annotations
 
-from collections.abc import Callable
 from typing import Any
 
-from eventflow import Subscription
+from eventflow import EventBus
+from eventflow.engine import EventEngine
 
 from .connection import MavConnection
 from .endpoint import MavEndpoint
-from .filter import MavMessageFilter, MessagePredicate, MessageTypeInput
 from .router import MavMessageRouter
 
 
@@ -31,6 +30,10 @@ class MavClient:
             raise ValueError("MavClient router farklı bir connection kullanıyor")
         self.connection = connection
         self.router = router or MavMessageRouter(connection)
+        self.events = EventEngine()
+        self.events.add("mavlink.messages", self.router.messages)
+        self.events.add("mavlink.connection.errors", self.connection.errors)
+        self.events.add("mavlink.router.errors", self.router.errors)
 
     @property
     def endpoint(self) -> MavEndpoint:
@@ -48,6 +51,10 @@ class MavClient:
     def mavlink(self) -> Any:
         return self.connection.mavlink
 
+    @property
+    def messages(self) -> EventBus[Any]:
+        return self.router.messages
+
     def start(self) -> None:
         self.router.start()
 
@@ -61,34 +68,6 @@ class MavClient:
         self.connection.endpoint = endpoint
 
     close = stop
-
-    def subscribe(
-        self,
-        callback: Callable[[Any], None],
-        message_filter: MavMessageFilter | MessageTypeInput | None = None,
-    ) -> Subscription:
-        return self.router.subscribe(callback, message_filter)
-
-    def wait_for(
-        self,
-        message_types: MavMessageFilter | MessageTypeInput,
-        *,
-        predicate: MessagePredicate | None = None,
-        timeout: float = 3.0,
-        after_sequence: int | None = None,
-    ) -> Any:
-        return self.router.wait_for(
-            message_types,
-            predicate=predicate,
-            timeout=timeout,
-            after_sequence=after_sequence,
-        )
-
-    def latest(
-        self,
-        message_filter: MavMessageFilter | MessageTypeInput | None = None,
-    ) -> Any | None:
-        return self.router.latest(message_filter)
 
     def send(self, message: Any) -> None:
         self.connection.send(message)

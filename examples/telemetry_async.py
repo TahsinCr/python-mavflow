@@ -5,25 +5,30 @@ from __future__ import annotations
 import argparse
 import asyncio
 
-from mavflow import MavAsyncChannel, MavEndpoint, MavRuntime
+from eventflow import AsyncEventQueue
+
+from mavflow import MavEndpoint, MavRuntime
 
 
 async def receive_heartbeat(host: str, port: int, timeout: float) -> int:
     runtime = MavRuntime(MavEndpoint.udp(host, port))
-    channel = MavAsyncChannel(runtime.router, "HEARTBEAT", maxsize=64)
-    channel.start()
     try:
-        runtime.start()
-        try:
-            message = await channel.receive(timeout=timeout)
-        except asyncio.TimeoutError:
-            print(f"No heartbeat received from {host}:{port} within {timeout:g}s")
-            return 1
-        print(message)
-        return 0
+        async with AsyncEventQueue(
+            runtime.messages,
+            routing_key="HEARTBEAT",
+            capacity=64,
+            overflow="drop_oldest",
+        ) as events:
+            runtime.start()
+            try:
+                envelope = await asyncio.wait_for(events.receive(), timeout=timeout)
+            except asyncio.TimeoutError:
+                print(f"No heartbeat received from {host}:{port} within {timeout:g}s")
+                return 1
+            print(envelope.message)
+            return 0
     finally:
-        channel.stop()
-        runtime.stop()
+        runtime.close()
 
 
 def main() -> None:

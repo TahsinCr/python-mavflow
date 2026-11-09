@@ -1,4 +1,4 @@
-[![Sürüm: v1.0][version-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/CHANGELOG.md)
+[![Sürüm: v2.0][version-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/CHANGELOG.md)
 [![Python 3.10+][python-shield]](https://www.python.org/downloads/)
 [![MIT Lisansı][license-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/LICENSE)
 
@@ -87,63 +87,56 @@ sağlar.
 <a id="version"></a>
 ### Sürüm
 
-Güncel paket serisi **v1.0**'dır. Proje metadata'sı ve kurulu paket aynı
-sürümü `mavflow.__version__` üzerinden sunar:
+Bu kırıcı API serisi **v2.0**'dır. Mesaj aboneliği, bekleme, filtreleme ve
+saklanan geçmiş `runtime.messages` üzerinden doğrudan EventFlow kullanır;
+Mavflow paralel bir abonelik veya history API'si tutmaz.
 
 ~~~python
 from mavflow import __version__
 
-print(__version__)  # 1.0
+print(__version__)  # 2.0
 ~~~
 
 <a id="first-heartbeat"></a>
 ### İlk heartbeat mesajını alma
 
-Bu async örnek UDP 14550 portunu dinler ve `MavAsyncChannel` üzerinden
-heartbeat mesajını bekler. Bağlantı yaşam döngüsünü runtime yönetir; channel,
-yönlendirilmiş mesajları asyncio event loop'una aktarır. Araç veya simülatörün
-yapılandırılan endpoint'e MAVLink paketi göndermesi gerekir.
+Bu async örnek UDP 14550 portunu dinler ve EventFlow'un sınırlı
+`AsyncEventQueue` kuyruğundan heartbeat bekler. MAVLink router tek transport
+okuyucusu olarak kalır; async tüketici için ek bir okuma thread'i açılmaz.
 
 ~~~python
 import asyncio
 
-from mavflow import MavAsyncChannel, MavEndpoint, MavRuntime
+from eventflow import AsyncEventQueue
+from mavflow import MavEndpoint, MavRuntime
 
 
 async def main() -> None:
     runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
-    channel = MavAsyncChannel(runtime.router, "HEARTBEAT", maxsize=64)
-    channel.start()
-    try:
+    async with AsyncEventQueue(
+        runtime.messages,
+        routing_key="HEARTBEAT",
+        capacity=64,
+        overflow="drop_oldest",
+    ) as heartbeats:
         runtime.start()
         try:
-            message = await channel.receive(timeout=10.0)
+            envelope = await asyncio.wait_for(heartbeats.receive(), timeout=10.0)
         except asyncio.TimeoutError:
             print("Süre dolmadan heartbeat alınamadı")
         else:
-            print("İlk heartbeat:", message)
-    finally:
-        channel.stop()
-        runtime.stop()
+            print("İlk heartbeat:", envelope.message)
+        finally:
+            runtime.stop()
+    runtime.close()
 
 
 asyncio.run(main())
 ~~~
 
-Senkron uygulamada runtime context manager'ını ve `wait_for()` metodunu
-doğrudan kullanın:
-
-~~~python
-from mavflow import MavEndpoint, MavRuntime
-
-with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as link:
-    message = link.wait_for("HEARTBEAT", timeout=10.0)
-    if message is not None:
-        print("İlk heartbeat:", message)
-~~~
-
-Senkron ve async örnekler komut satırından çalıştırılabilir modüller olarak da
-sunulur.
+Senkron kodda `runtime.messages.wait_for(routing_key="HEARTBEAT")` kullanın;
+sonuç bir `MavMessageEnvelope`, asıl pymavlink mesajı ise `.message` alanıdır.
+Transport yaşam döngüsünü runtime yönetir.
 
 <a id="run-an-example"></a>
 ### Bir örneği çalıştırma
@@ -172,14 +165,15 @@ paket kodlama ve birleştirmeyi gösterir.
 | Bileşen | Kullanım amacı |
 | --- | --- |
 | `MavConnection` | `pymavlink` transportunu açmak ve ham MAVLink mesajlarını gönderip almak. |
-| `MavMessageRouter` | Okuma döngüsünü sahiplenmek, mesajları filtrelemek ve sınırlı geçmiş tutmak. |
-| `MavClient` | Bağlantı ve router'ı tek bir senkron fasad üzerinden kullanmak. |
-| `MavRuntime` | Client yaşam döngüsünü ve isteğe bağlı uygulama eşleriyle handler'ları yönetmek. |
-| `MavAsyncChannel` | Yönlendirilen mesajları sınırlı kuyruk üzerinden asyncio event loop'una iletmek. |
+| `MavMessageRouter` | Tek okuma döngüsünü sahiplenip tipli mesaj envelope'ları yayımlamak. |
+| `MavClient` | Connection, router ve EventFlow isimli kanallarını birleştirmek. |
+| `MavRuntime` | Client yaşam döngüsünü ve isteğe bağlı uygulama servislerini yönetmek. |
+| EventFlow `EventBus` | Envelope'lara abone olmak, filtrelemek, beklemek ve geçmişi sorgulamak. |
+| EventFlow `AsyncEventQueue` | Senkron bus'ı asyncio içinde sınırlı kuyrukla tüketmek. |
 
-Normal uygulama giriş noktası olarak `MavRuntime` kullanın. Uygulamanın
-transport veya router sahipliğini kendisinin yönetmesi gerekiyorsa alt
-katmanları doğrudan birleştirin.
+Normal uygulama giriş noktası olarak `MavRuntime` kullanın. EventFlow doğrudan
+çalışma zamanı bağımlılığıdır; `EventBus`, `EventFilter`, `EventEngine` ve
+`AsyncEventQueue` tiplerini `eventflow` paketinden import edin.
 
 <a id="core-concepts"></a>
 ## Temel kavramlar
@@ -208,45 +202,55 @@ beklenen adresi ve transport biçimini seçin.
 import edildiğinde bir cihaz açılmaz ve transport modülü yüklenmez; `pymavlink`
 gerçek bağlantı oluşturulurken yüklenir. Connection; yaşam döngüsü metotlarını,
 ham mesaj erişimini, gönderim yardımcılarını ve araç hedef bilgilerini sağlar.
+Bu düşük seviyede `MavConnection.receive()`, pymavlink'in yerel mesaj tipi
+filtresini (`str`, `list[str]` veya `set[str]`) ve condition ifadesini doğrudan
+iletir. Router çalışırken tek okuyucu olarak kalmalıdır; yönlendirilmiş telemetri
+için `runtime.messages` kanalını kullanın.
 
 <a id="router"></a>
 ### Tek okuyucu ve mesaj router'ı
 
-`MavMessageRouter` bir bağlantının mesaj okuma döngüsünü sahiplenir.
-Gelen her mesajı bir kez okur, mesaj ve sıra durumunu kaydeder, ardından
-eşleşen mesajları etkin aboneliklere teslim eder.
+`MavMessageRouter` bağlantının okuma döngüsünü sahiplenir. Gelen mesajı bir
+kez okur, `MavMessageEnvelope` içine alır ve EventFlow `EventBus` üzerinden bir
+kez yayımlar. Bus abonelikleri `message_type` anahtarına göre indeksler;
+anahtarlı abonelik ilgisiz MAVLink tiplerinin callback'lerini atlar ve kayıt
+sırasını korur.
 
 Tek okuyucu sahipliği transport okumasını ve yönlendirmeyi tek yerde tutar.
-Router callback'leri mesaj teslimatı sırasında çalışır; bu nedenle kısa
-tutulmaları gerekir. Okuma döngüsünü bekletmemek için bloklayan işleri
-uygulamanın kendi worker'larına taşıyın.
-
-Router güncel istatistikleri, eşleşen son mesajı, sınırlı geçmişi ve mesaj
-bekleme işlemini sunar. `MavClient` bir connection ile router'ı bir araya
-getirir; uygulamanın bu nesneleri elle bağlamasını gerektirmez.
+Router callback'leri senkron teslimat sırasında çalışır; kısa tutun veya pahalı
+işleri sınırlı bir worker'a gönderin. `MavClient` ve `MavRuntime`, aynı native
+EventFlow bus'ını `messages`, engine'i `events` olarak doğrudan sunar.
 
 <a id="filtering"></a>
 ### Filtreleme ve mesaj geçmişi
 
-`MavMessageFilter` mesaj tiplerine, kaynak system kimliklerine, kaynak
-component kimliklerine, mesaj ID'lerine, mesaja uygulanan bir koşula veya
-predicate'e göre eşleşme yapabilir. Callback yalnızca istenen telemetri
-alt kümesini alacak şekilde kriterleri birleştirin:
+EventFlow routing key ve predicate kullanarak abone olun. Routing key router'ın
+indeksli bus'ında bir mesaj tipini seçer; ek kaynak kimlikleri ve uygulama
+koşulları için `EventFilter` kullanın:
 
 ~~~python
-from mavflow import MavMessageFilter
+from eventflow import EventFilter
 
-konum_filtresi = MavMessageFilter.for_types(
-    "GLOBAL_POSITION_INT",
-    source_systems=1,
+from mavflow import MavEndpoint, MavRuntime
+
+runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+source_one = EventFilter(predicate=lambda envelope: envelope.source_system == 1)
+subscription = runtime.messages.subscribe(
+    lambda envelope: print(envelope.message),
+    routing_key="GLOBAL_POSITION_INT",
+    event_filter=source_one,
 )
+runtime.start()
+try:
+    runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+finally:
+    subscription.cancel()
+    runtime.close()
 ~~~
 
-Callback kaydı için filtreyi `subscribe()` metoduna verin. Tip filtresi
-doğrudan `wait_for()`, `latest()` veya router'ın `history()` metoduna da
-verilebilir. Yalnızca en yeni eşleşen mesajları almak için
-`history()` ile `limit` kullanın. Geçmiş bellekte tutulur ve sınırlıdır; kalıcı
-bir telemetri günlüğü değildir.
+Envelope; `source_component`, `message_id`, sequence ve alım zamanını da taşır.
+Native MAVLink condition koşulunu `runtime.connection.evaluate_condition(condition)`
+çağıran bir EventFlow predicate'i içinde değerlendirebilirsiniz.
 
 <a id="lifecycle"></a>
 ### Yaşam döngüsü ve bileşim
@@ -278,108 +282,95 @@ veya onu ilgili servis yaşam döngüsüyle yönetin.
 <a id="subscribe"></a>
 ### Mesajlara abone olma
 
-`MavRuntime.subscribe()` bir mesaj tipini veya filtreyi ve callback'i
-kabul eder. Dönen abonelik runtime'dan bağımsız olarak iptal edilebilir:
-
-~~~python
-from mavflow import MavEndpoint, MavMessageFilter, MavRuntime
-
-
-def konumu_goster(message: object) -> None:
-    print(message)
-
-
-konum_filtresi = MavMessageFilter.for_types(
-    "GLOBAL_POSITION_INT",
-    source_systems=1,
-)
-
-with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as link:
-    konum_aboneligi = link.subscribe(konum_filtresi, konumu_goster)
-    heartbeat_aboneligi = link.subscribe("HEARTBEAT", print)
-    try:
-        link.wait_for("HEARTBEAT", timeout=10.0)
-    finally:
-        konum_aboneligi.cancel()
-        heartbeat_aboneligi.cancel()
-~~~
-
-Mesaj filtreleri kaynak component ve mesaj ID'siyle de sınırlandırılabilir;
-alınan mesaja bir koşul veya predicate uygulanabilir. Mesaj nesnesi
-`pymavlink` tarafından sağlanır. Kaynak system, kaynak component ve mesaj tipi
-gibi alanlar için üretilen mesaj erişim metotlarını kullanın.
-
-<a id="wait-and-history"></a>
-### Mesaj bekleme ve geçmişi inceleme
-
-Kodun tek bir eşleşen mesaja ihtiyacı varsa `wait_for()` kullanın. Daha önce
-gelen en yeni eşleşmeyi `latest()` ile, saklanan mesajları `history()` ile
-alabilirsiniz:
+`runtime.messages` doğrudan EventFlow `EventBus` nesnesidir. `subscribe()` ve
+`once()` native EventFlow abonelikleri döndürür; callback'e
+`MavMessageEnvelope` verilir:
 
 ~~~python
 from mavflow import MavEndpoint, MavRuntime
 
-with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as link:
-    ilk_heartbeat = link.wait_for("HEARTBEAT", timeout=10.0)
-    son_mesaj = link.latest("HEARTBEAT")
-    son_mesajlar = link.router.history("HEARTBEAT", limit=20)
-    router_durumu = link.state.router
+runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+subscription = runtime.messages.subscribe(
+    lambda envelope: print(envelope.message),
+    routing_key="HEARTBEAT",
+)
+runtime.start()
+try:
+    first = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+    print("İlk heartbeat:", first.message if first is not None else None)
+finally:
+    subscription.cancel()
+    runtime.close()
 ~~~
 
-`wait_for()` süre aşımında `None` döndürür. Eşleşen mesaj henüz alınmadıysa
-`latest()` de `None` verir. History, mesaj envelope'larını yayın sırasıyla
-tutar. Router istatistikleri alınan mesajları, okuma ve dispatch hatalarını,
-tahmini kayıp mesajları ve teslimat kalitesini içerir.
+Ek koşullar için `EventFilter` veya `event_type` ve `predicate` abonelik
+argümanlarını kullanın. `routing_key` EventFlow tarafından indeks üzerinde
+uygulanır; telemetri aboneliği ilgisiz mesaj tiplerini taramaz.
 
-Client veya runtime üzerinden MAVLink mesajı göndermek için `send()` ya da
-`send_named()` kullanın. Metot adı ve argümanlar üretilen `pymavlink`
-dialect API'sini izler.
+<a id="wait-and-history"></a>
+### Mesaj bekleme ve geçmişi inceleme
+
+Tek bir gelecek mesaj için EventFlow `wait_for()` kullanın. Sınırlı EventFlow
+geçmişi bus üzerinden doğrudan erişilebilir ve aynı native filtreleri kabul eder:
+
+~~~python
+from eventflow import EventFilter
+
+from mavflow import MavEndpoint, MavRuntime
+
+with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as runtime:
+    envelope = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+    history = runtime.messages.history
+    heartbeat_filter = EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT")
+    recent = history.query(heartbeat_filter, limit=20) if history is not None else ()
+    latest = history.latest(heartbeat_filter) if history is not None else None
+    router_state = runtime.state.router
+~~~
+
+`wait_for()` süre aşımında `None` döndürür. Geçmiş envelope'ları yayın sırasıyla
+ve `history_limit` (varsayılan 512) sınırı içinde tutar; kalıcı bir telemetri
+logu değildir. Router istatistikleri okuma/dispatch hatalarını, tahmini kaybı
+ve teslimat kalitesini içerir.
 
 <a id="async-applications"></a>
 ## Async uygulamalar
 
-MAVLink transport okuması senkron router'ın sahipliğinde kalır.
-`MavAsyncChannel` seçilen mesajları bir asyncio event loop'una aktarır;
-ikinci bir transport okuyucusu açmaz, sınırlı bir köprü görevi görür. Kuyruk
-dolduğunda en eski bekleyen mesajı atar ve `dropped_messages` sayacını artırır.
-
-Channel'ı çalışan event loop içinde başlatın. Router aboneliğini düzgün
-kapatabilmesi için runtime'ı durdurmadan önce channel'ı durdurun. Bu örnek
-sürekli mesaj akışını tüketir ve dış görevi iptal edildiğinde temizlenir:
+MAVLink transport okuması senkron router'ın sahipliğinde kalır. Aynı
+envelope'ları asyncio içinde almak için EventFlow `AsyncEventQueue` kullanın.
+Filtre kuyruğun kapasitesini tüketmeden uygulanır; tüketici yavaşladığında
+`drop_oldest` en yeni telemetriyi korur.
 
 ~~~python
 import asyncio
 
-from mavflow import MavAsyncChannel, MavEndpoint, MavRuntime
+from eventflow import AsyncEventQueue
+from mavflow import MavEndpoint, MavRuntime
 
 
 async def main() -> None:
     runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
-    channel = MavAsyncChannel(
-        runtime.router,
-        "HEARTBEAT",
-        maxsize=64,
-    )
-    channel.start()
-    try:
+    async with AsyncEventQueue(
+        runtime.messages,
+        routing_key="HEARTBEAT",
+        capacity=64,
+        overflow="drop_oldest",
+    ) as heartbeats:
         runtime.start()
-        while True:
-            message = await channel.receive()
-            print(message)
-    finally:
-        channel.stop()
-        runtime.stop()
+        try:
+            while True:
+                envelope = await heartbeats.receive()
+                print(envelope.message)
+        finally:
+            runtime.stop()
+    runtime.close()
 
 
 asyncio.run(main())
 ~~~
 
-Süre dolmadan mesaj gelmezse `receive(timeout=...)` `asyncio.TimeoutError` yükseltir.
-`receive_nowait()` kuyruktaki hazır mesajı alır; kuyruk boşsa
-`asyncio.QueueEmpty` yükseltir. Bekleyen ve atılan mesaj sayaçları sınırlı
-teslimatın izlenmesini sağlar. Argüman ayrıştırma ve kapatma akışını içeren CLI
-örneği için [examples/telemetry_async.py](examples/telemetry_async.py)
-dosyasına bakın.
+Kuyruk MAVLink reader'ı sahiplenmez ve her yayın için asyncio task'ı oluşturmaz.
+`stats()` kuyruk derinliğini ve düşen event sayısını verir. Tüketici task'ını
+normal şekilde iptal edin; `async with` EventFlow aboneliğini kaldırır.
 
 <a id="application-packets"></a>
 ## Uygulama paketleri
@@ -494,30 +485,26 @@ logları yerel depolamaya yazmaz.
 | Belirti | Kontroller |
 | --- | --- |
 | `wait_for()` `None` döndürüyor veya async receive süre aşımına uğruyor. | Göndericinin yapılandırılmış UDP/TCP endpoint'e veri gönderdiğini, araç veya simülatörün yayın yaptığını ve istenen mesaj tipinin mevcut olduğunu doğrulayın. Bağlantının açılması daha uzun sürüyorsa timeout'u artırın. |
-| `MavAsyncChannel.start()` çalışan loop olmadığını bildiriyor. | Channel'ı çalışan bir `async def` içinden oluşturup başlatın, sonra runtime'ı başlatın. |
-| `dropped_messages` sürekli artıyor. | Sınırlı kuyruğa, tüketicinin işleyebileceğinden hızlı mesaj geliyor. Filtreyi gereken mesaj tiplerine daraltın, tüketiciyi hızlandırın veya bellek uygunsa `maxsize` değerini artırın. |
+| Async receive bekliyor veya kuyruk kapasitesi doluyor. | `AsyncEventQueue.stats()` ve yapılandırılan taşma politikasını kontrol edin. Yalnızca gereken mesaj tiplerini yönlendirin, olayları daha hızlı işleyin veya bellek uygunsa `capacity` değerini artırın. |
 | Uygulama `request()` çağrısı süre aşımına uğruyor. | Uzak peer'ın çalıştığını, paket tipiyle yanıt tipinin kayıtlı handler ile eşleştiğini ve system/component ID'lerinin bu peer'a yönlendirdiğini kontrol edin. |
 
-Senkron runtime bekleme süresi dolunca `None` döndürür. Async channel receive
-`asyncio.TimeoutError`, uygulama request'i ise `TimeoutError` yükseltir. Bir
-görev birden fazla API katmanı kullanıyorsa bu durumları ayrı ele alın.
+EventFlow `wait_for()` bekleme süresi dolunca `None` döndürür. Async queue
+receive `asyncio.TimeoutError`, uygulama request'i ise `TimeoutError` yükseltir.
+Bir görev birden fazla API kullanıyorsa bu durumları ayrı ele alın.
 
 <a id="operational-boundaries"></a>
 ## Güvenlik ve çalışma sınırları
 
-Mavflow MAVLink transportu ve yeniden kullanılabilir yönlendirme altyapısı
-sağlar. Araç politikasına, komut yetkilendirmesine, görev davranışına veya
-uygulamanın telemetriyi nasıl saklayacağına karar vermez.
+Mavflow MAVLink transportu ve protokol modellerini sağlar. Araç politikasını,
+komut yetkilendirmesini, görev davranışını veya uygulamanın telemetriyi nasıl
+saklayacağını belirlemez.
 
-Router history'si, asyncio channel'ı, uygulama parçası birleştirme belleği ve
-dispatcher işleri bellekte tutulur ve sınırlıdır. Kendi sahip oldukları yaşam
-döngüsü sona erdiğinde temizlenir; kalıcı kuyruk değildir. Uzun çalışan
-servislerde router istatistiklerini, channel drop sayısını, peer durumunu ve
-runtime/uygulama hata event'lerini izleyin.
-
-MAVLink endpoint'leri ve ağ erişimi araç ile dağıtım yapılandırmasına uygun
-olmalıdır. Transport güvenliği, komut politikası ve iş düzeyindeki payload
-doğrulaması uygulamanın sorumluluğundadır.
+MAVLink history'si, async kuyruk kapasitesi, uygulama parçası birleştirme ve
+handler işleri bellekte sınırlıdır. EventFlow mesaj geçmişini, abonelikleri,
+queue taşma davranışını ve sınırlı worker yürütmesini yönetir. Mavflow yalnızca
+tek reader, paket birleştirme, istek korelasyonu ve MAVLink kayıp tahmini gibi
+protokole özel durumu tutar. `runtime.stop()` EventFlow kanallarını yeniden
+başlatma için açık bırakır; `runtime.close()` EventFlow engine'ini de kapatır.
 
 <a id="composition"></a>
 ## Yığını birleştirme
@@ -574,46 +561,48 @@ gerekiyorsa ayrı runtime kullanın.
 | --- | --- |
 | `MavEndpoint` | TCP, UDP veya seri bağlantı tanımını normalize etmek. |
 | `MavConnection` | `pymavlink` transportu, yaşam döngüsünü ve ham gönderme/alma işlemlerini yönetmek. |
-| `MavMessageRouter` | Tek okuma döngüsünü, filtreli callback'leri, sıra durumunu ve sınırlı geçmişi yönetmek. |
-| `MavClient` | Connection ile router'ı senkron bir fasad olarak birleştirmek. |
+| `MavMessageRouter` | Tek okuma döngüsünü sahiplenip anahtarlı mesaj envelope'ları yayımlamak. |
+| `MavClient` | Connection, router ve EventFlow engine'ini birleştirmek. |
 | `MavRuntime` | Client ve isteğe bağlı uygulama servislerini birlikte başlatıp durdurmak. |
-| `MavAsyncChannel` | Filtreli router teslimatını sınırlı asyncio kuyruğuna aktarmak. |
 | `MavApplicationChannel` | Uygulama parçalarını MAVLink `V2_EXTENSION` üzerinden taşımak. |
 | `MavApplicationPeer` | Bildirim ve ilişkili istekleri göndermek, peer canlılığını izlemek. |
-| `MavApplicationDispatcher` | Kayıtlı paket handler'larını sınırlı worker kapasitesiyle çalıştırmak. |
+| `MavApplicationDispatcher` | Kayıtlı paket handler'larını EventFlow sınırlı worker pool'u ile çalıştırmak. |
 
-### Runtime metotları
+### Runtime ve EventFlow API'leri
 
-| Metot | Davranış |
+| Erişim | Davranış |
 | --- | --- |
-| `start()` / `stop()` | Runtime'ı ve sahip olduğu servisleri başlatıp durdurmak. |
-| `subscribe(filter, callback)` | Eşleşen MAVLink mesajlarını senkron callback'e yönlendirmek. |
-| `once(filter, callback)` | Tek eşleşen mesaj için callback kaydetmek. |
-| `wait_for(filter, timeout=None)` | Eşleşen bir mesajı veya süre dolunca `None` döndürmek. |
-| `latest(filter=None)` | En yeni eşleşen mesajı veya `None` döndürmek. |
-| `notify(packet_type, payload=None)` | Tek yönlü uygulama paketi göndermek; application role gerekir. |
-| `request(packet_type, payload=None, ...)` | İlişkili uygulama isteği göndermek ve yanıt beklemek. |
-| `handle(packet_type, handler)` | Uygulama handler'ı kaydetmek; iptal edilebilir abonelik döndürür. |
+| `runtime.messages` | Doğrudan EventFlow `EventBus[MavMessageEnvelope]`; `subscribe`, `once`, `wait_for` ve history sağlar. |
+| `runtime.events` | MAVLink ve uygulama kanallarını sahiplenen doğrudan EventFlow `EventEngine`. |
+| `runtime.start()` / `stop()` / `close()` | Başlatmak, yeniden başlatma için durdurmak veya durdurup EventFlow kanallarını kapatmak. |
+| `runtime.notify(packet_type, payload=None)` | Tek yönlü uygulama paketi göndermek; application role gerekir. |
+| `runtime.request(packet_type, payload=None, ...)` | İlişkili uygulama isteği göndermek ve yanıt beklemek. |
+| `runtime.handle(packet_type, handler)` | Uygulama handler'ı kaydetmek; iptal edilebilir kayıt döndürmek. |
+
+Bileşen olaylarını `mavlink.connection.errors`, `mavlink.router.errors`,
+`mavlink.application.packets` ve `mavlink.dispatcher.errors` gibi EventFlow
+kanallarından alın. Mavflow ikinci bir toplu hata bus'ı oluşturmaz.
 
 <a id="public-types"></a>
 ### Public tipler ve hatalar
 
-Paket aşağıdaki public isimleri dışa aktarır:
+Mavflow transport, envelope, uygulama protokolü, peer, dispatcher ve uzak log
+tiplerini `mavflow` paketinden dışa aktarır. EventFlow yapılarını doğrudan
+çalışma zamanı bağımlılığı olan `flowevent` dağıtımının `eventflow` paketinden
+import edin: `EventBus`, `EventFilter`, `EventEngine`, `AsyncEventQueue` ve
+`BoundedWorkPool`.
 
-| Alan | Public isimler |
+| Alan | Mavflow public isimleri |
 | --- | --- |
-| Transport ve yönlendirme | `MavEndpoint`, `MavConnection`, `MavMessageRouter`, `MavMessageFilter`, `MavMessageEnvelope`, `MavHeader`, `MavMessage`, `MavRouterStats`, `MessageCache` |
-| Runtime ve async | `MavClient`, `MavRuntime`, `MavRuntimeState`, `MavAsyncChannel` |
+| Transport ve yönlendirme | `MavEndpoint`, `MavConnection`, `MavMessageRouter`, `MavMessageEnvelope`, `MavHeader`, `MavMessage`, `MavRouterStats` |
+| Runtime | `MavClient`, `MavRuntime`, `MavRuntimeState` |
 | Uygulama protokolü | `MavApplicationPacket`, `MavApplicationCodec`, `MavApplicationAssembler`, `MavApplicationChannel`, `MavApplicationPeer`, `MavApplicationDispatcher`, `MavApplicationHandlerRegistry`, `MavApplicationResult`, `MavApplicationResponse` |
 | Uzak log | `MavRemoteLogLevel`, `MavRemoteLogRecord`, `MavRemoteLogBatch` |
 
-`MavHeader` ve `MavMessage`, `mavflow.contracts` modülünde tanımlanır
-ve `mavflow` paketinden de dışa aktarılır.
-
-Önemli hata tipleri arasında `MavUnavailableError`,
-`MavRouterError`, `MavRuntimeError` ve
-`MavApplicationProtocolError` bulunur. Uygulamanın özel olarak işlemesi
-gereken hata sınıflarını `mavflow` paketinden import edin.
+`MavHeader` ve `MavMessage`, `mavflow.contracts` modülünde tanımlanır ve
+`mavflow` paketinden de dışa aktarılır. Bileşen hata değerleri ayrı EventFlow
+kanallarında kalır; `MavRouterError`, `MavUnavailableError` ve
+`MavApplicationProtocolError` `mavflow` paketinden import edilebilir.
 
 <a id="development"></a>
 ## Geliştirme ve lisans
@@ -666,6 +655,6 @@ kaydeder.
 Telif © 2026 TahsinCr. Mavflow MIT Lisansı ile dağıtılır. Ayrıntılar için
 [LICENSE](https://github.com/TahsinCr/python-mavflow/blob/main/LICENSE) dosyasına bakın.
 
-[version-shield]: https://img.shields.io/badge/version-v1.0-b7a3e3.svg?style=for-the-badge
+[version-shield]: https://img.shields.io/badge/version-v2.0-b7a3e3.svg?style=for-the-badge
 [python-shield]: https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
 [license-shield]: https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge

@@ -6,6 +6,7 @@ import socket
 import threading
 import unittest
 
+from eventflow import EventFilter
 from pymavlink import mavutil
 
 from mavflow.connection import MavConnection
@@ -49,15 +50,17 @@ class PymavlinkUdpIntegrationTests(unittest.TestCase):
 
         sender_thread = threading.Thread(target=send_heartbeats, daemon=True)
         sender_thread.start()
+        boundary = router.sequence
+        next_envelope = EventFilter(predicate=lambda envelope: envelope.sequence > boundary)
         try:
-            connection.start()
             router.start()
-            boundary = router.sequence
-            message = router.wait_for(
-                "HEARTBEAT",
+            envelope = router.messages.wait_for(
+                routing_key="HEARTBEAT",
+                event_filter=next_envelope,
                 timeout=2.0,
-                after_sequence=boundary,
             )
+            self.assertIsNotNone(envelope)
+            message = envelope.message
             self.assertEqual(message.get_srcSystem(), 1)
             self.assertEqual(message.get_srcComponent(), 1)
         finally:

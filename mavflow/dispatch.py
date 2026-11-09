@@ -2,11 +2,10 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable, Mapping
-from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 from typing import Any
 
-from eventflow import EventBus, Subscription
+from eventflow import BoundedWorkPool, EventBus, Subscription
 
 from .application import MavApplicationPacket
 from .peer import MavApplicationPeer
@@ -132,17 +131,13 @@ class MavApplicationDispatcher:
         thread_name: str = "MavApplicationDispatch",
         handlers: MavApplicationHandlerRegistry | None = None,
     ) -> None:
-        if int(workers) <= 0:
-            raise ValueError("Application dispatcher worker count must be positive")
-        if int(max_pending) <= 0:
-            raise ValueError("Application dispatcher queue limit must be positive")
         self._peer = peer
-        self._workers = int(workers)
-        self._thread_name = str(thread_name).strip() or "MavApplicationDispatch"
-        self._capacity = threading.BoundedSemaphore(int(max_pending))
+        self._workers = workers
+        self._thread_name = thread_name
+        self._max_pending = max_pending
         self._handlers = handlers or MavApplicationHandlerRegistry()
         self._subscription: Subscription | None = None
-        self._executor: ThreadPoolExecutor | None = None
+        self._work_pool: BoundedWorkPool | None = None
         self._generation = 0
         self._lock = threading.RLock()
         self._worker_context = threading.local()
@@ -174,8 +169,9 @@ class MavApplicationDispatcher:
             if self._subscription is not None:
                 return
             self._generation += 1
-            self._executor = ThreadPoolExecutor(
+            self._work_pool = BoundedWorkPool(
                 max_workers=self._workers,
+                max_pending=self._max_pending,
                 thread_name_prefix=self._thread_name,
             )
             self._subscription = self._peer.packets.subscribe(self._on_packet)
@@ -187,14 +183,14 @@ class MavApplicationDispatcher:
         with self._lock:
             subscription = self._subscription
             self._subscription = None
-            executor = self._executor
-            self._executor = None
+            work_pool = self._work_pool
+            self._work_pool = None
             self._generation += 1
         if subscription is not None:
             subscription.cancel()
-        if executor is not None:
+        if work_pool is not None:
             called_from_worker = bool(getattr(self._worker_context, "active", False))
-            executor.shutdown(
+            work_pool.shutdown(
                 wait=not called_from_worker,
                 cancel_futures=True,
             )
@@ -205,9 +201,9 @@ class MavApplicationDispatcher:
         if packet.packet_type in self.RESERVED_TYPES:
             return False
         with self._lock:
-            executor = self._executor
+            work_pool = self._work_pool
             generation = self._generation
-        if executor is None:
+        if work_pool is None:
             self.errors.publish(RuntimeError("MAVLink application dispatcher is not running"))
             return False
         handler = self._handlers.resolve(packet.packet_type)
@@ -222,33 +218,21 @@ class MavApplicationDispatcher:
                     ),
                 )
             return False
-        if not self._capacity.acquire(blocking=False):
-            error = RuntimeError("MAVLink application dispatcher queue is full")
-            self.errors.publish(error)
-            if packet.expects_response:
-                self._respond(
-                    packet,
-                    MavApplicationResult.failure(
-                        str(error),
-                        {"error_type": "DispatcherBusy"},
-                    ),
-                )
-            return False
         try:
-            future = executor.submit(self._execute, packet, handler, generation)
+            work_pool.submit(self._execute, packet, handler, generation)
         except Exception as exc:
-            self._capacity.release()
-            self.errors.publish(exc)
+            busy = isinstance(exc, RuntimeError) and self._is_generation_active(generation)
+            error = RuntimeError("MAVLink application dispatcher queue is full") if busy else exc
+            self.errors.publish(error)
             if packet.expects_response and self._is_generation_active(generation):
                 self._respond(
                     packet,
                     MavApplicationResult.failure(
-                        str(exc),
-                        {"error_type": exc.__class__.__name__},
+                        str(error),
+                        {"error_type": "DispatcherBusy" if busy else exc.__class__.__name__},
                     ),
                 )
             return False
-        future.add_done_callback(lambda _future: self._capacity.release())
         return True
 
     def _execute(
@@ -323,7 +307,7 @@ class MavApplicationDispatcher:
         with self._lock:
             return (
                 self._subscription is not None
-                and self._executor is not None
+                and self._work_pool is not None
                 and self._generation == generation
             )
 
