@@ -4,9 +4,11 @@ All notable changes to Mavflow are documented here.
 
 ## [Unreleased]
 
+## [v1.0] - 2026-11-09
+
 ### Added
 
-- Prepare Mavflow v1.0.0 as a standalone Python package for MAVLink transport,
+- Prepare Mavflow v1.0 as a standalone Python package for MAVLink transport,
   message routing, application packets, peer coordination, and remote log models.
 - Extract the MAVLink package from [Vehicle Autonomy Core](https://github.com/TahsinCr/vehicle-autonomy-core/tree/main/mavlink).
 - Use [EventFlow](https://github.com/TahsinCr/python-eventflow) for synchronous

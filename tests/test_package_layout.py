@@ -11,7 +11,7 @@ from mavflow.contracts import MavHeader, MavMessage
 
 class PackageLayoutTests(unittest.TestCase):
     def test_public_package_identity_and_runtime_exports(self) -> None:
-        self.assertEqual(mavflow.__version__, "1.0.0")
+        self.assertEqual(mavflow.__version__, "1.0")
         self.assertIn("MavRuntime", mavflow.__all__)
         self.assertIs(mavflow.MavRuntime, MavRuntime)
 

@@ -1,4 +1,4 @@
-[![Version: v1.0.0][version-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/CHANGELOG.md)
+[![Version: v1.0][version-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/CHANGELOG.md)
 [![Python 3.10+][python-shield]](https://www.python.org/downloads/)
 [![MIT License][license-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/LICENSE)
 
@@ -87,13 +87,13 @@ The `dev` extra provides build, coverage, pyperf, Pyright, Ruff, and Twine.
 <a id="version"></a>
 ### Version
 
-The current package line is **v1.0.0**. The project metadata and installed
+The current package line is **v1.0**. The project metadata and installed
 package expose the same version through `mavflow.__version__`:
 
 ~~~python
 from mavflow import __version__
 
-print(__version__)  # 1.0.0
+print(__version__)  # 1.0
 ~~~
 
 <a id="first-heartbeat"></a>
@@ -659,6 +659,6 @@ The `CHANGELOG` records the extraction from
 Copyright © 2026 TahsinCr. Mavflow is licensed under the MIT License. See
 [LICENSE](https://github.com/TahsinCr/python-mavflow/blob/main/LICENSE).
 
-[version-shield]: https://img.shields.io/badge/version-v1.0.0-b7a3e3.svg?style=for-the-badge
+[version-shield]: https://img.shields.io/badge/version-v1.0-b7a3e3.svg?style=for-the-badge
 [python-shield]: https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
 [license-shield]: https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge

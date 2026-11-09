@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "mavflow"
-version = "1.0.0"
+version = "1.0"
 description = "MAVLink connection, routing, and application protocol tools for Python."
 readme = { file = "README.md", content-type = "text/markdown" }
 requires-python = ">=3.10"

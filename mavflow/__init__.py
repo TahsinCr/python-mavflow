@@ -1,6 +1,6 @@
 """Reusable MAVLink transport, routing, and application protocol tools."""
 
-__version__ = "1.0.0"
+__version__ = "1.0"
 
 from .application import (
     DEFAULT_APPLICATION_MESSAGE_TYPE,

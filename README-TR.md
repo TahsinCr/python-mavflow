@@ -1,4 +1,4 @@
-[![Sürüm: v1.0.0][version-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/CHANGELOG.md)
+[![Sürüm: v1.0][version-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/CHANGELOG.md)
 [![Python 3.10+][python-shield]](https://www.python.org/downloads/)
 [![MIT Lisansı][license-shield]](https://github.com/TahsinCr/python-mavflow/blob/main/LICENSE)
 
@@ -87,13 +87,13 @@ sağlar.
 <a id="version"></a>
 ### Sürüm
 
-Güncel paket serisi **v1.0.0**'dır. Proje metadata'sı ve kurulu paket aynı
+Güncel paket serisi **v1.0**'dır. Proje metadata'sı ve kurulu paket aynı
 sürümü `mavflow.__version__` üzerinden sunar:
 
 ~~~python
 from mavflow import __version__
 
-print(__version__)  # 1.0.0
+print(__version__)  # 1.0
 ~~~
 
 <a id="first-heartbeat"></a>
@@ -666,6 +666,6 @@ kaydeder.
 Telif © 2026 TahsinCr. Mavflow MIT Lisansı ile dağıtılır. Ayrıntılar için
 [LICENSE](https://github.com/TahsinCr/python-mavflow/blob/main/LICENSE) dosyasına bakın.
 
-[version-shield]: https://img.shields.io/badge/version-v1.0.0-b7a3e3.svg?style=for-the-badge
+[version-shield]: https://img.shields.io/badge/version-v1.0-b7a3e3.svg?style=for-the-badge
 [python-shield]: https://img.shields.io/badge/Python-3.10%2B-3776AB.svg?style=for-the-badge&logo=python&logoColor=white
 [license-shield]: https://img.shields.io/badge/license-MIT-blue.svg?style=for-the-badge
