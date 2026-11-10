@@ -23,14 +23,21 @@ Current reference workloads:
 | Suite | Workload |
 | --- | --- |
 | `router.json` | 1,000 messages, 1 subscriber, 100% HEARTBEAT matches. |
+| `router-no-match.json` | 1,000 messages, 10 subscribers, 0% HEARTBEAT matches. |
 | `router-filtered.json` | 1,000 messages, 10 subscribers, 10% HEARTBEAT matches. |
+| `router-half-match.json` | 1,000 messages, 10 subscribers, 50% HEARTBEAT matches. |
+| `router-all-match.json` | 1,000 messages, 10 subscribers, 100% HEARTBEAT matches. |
 | `codec.json` | 2,048-byte application packet encode and reassembly. |
 
-The refreshed router benchmark now calls MAVLink `get_seq()` and measures the
-sequence-quality path. The previous router suite omitted that path, so its
-timings are not a directly comparable before/after measurement. The new full
-pyperf runs also reported host jitter; treat these files as reproducible
-workload records, not as evidence of a performance gain.
+The refreshed router benchmark now reports the correct MAVLink message IDs,
+calls `get_seq()`, and measures the sequence-quality path. Its timed region
+starts when the preloaded queue is released and ends after final delivery. The
+previous router suite omitted the sequence path, so those timings are not a
+direct before/after comparison. The six refreshed pyperf suites use source
+revision `1ccd2b5d1120c7aa917c3d50ba301c15e2c7a8b7` and fingerprint
+`b02a28fa1ed1623f9959dd854b978c4d9f331a7862d9f0493485510161662c04`. Each run
+reported host instability; treat these as workload records, not evidence of a
+performance gain.
 
 The router workload times delivery through Mavflow's single-reader router from a
 preloaded in-memory queue. Its timed interval begins when the queue is released
