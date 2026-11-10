@@ -383,12 +383,15 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.channel._source_components, frozenset({3}))
         runtime.close()
 
-    def test_default_application_channel_blocks_unexpected_dispatcher_sources(self) -> None:
+    def test_dynamic_peer_identity_blocks_unexpected_dispatcher_sources(self) -> None:
         client = FakeClient([])
-        client.endpoint = MavEndpoint(expected_system=7, expected_component=3)
+        client.connection.target_system = 7
+        client.connection.target_component = 3
         runtime = MavRuntime(client=client, application_role="gcs")  # type: ignore[arg-type]
         assert runtime.channel is not None
         assert runtime.dispatcher is not None
+        self.assertIsNone(runtime.channel._source_systems)
+        self.assertIsNone(runtime.channel._source_components)
         handled: list[int] = []
         completed = threading.Event()
 
@@ -430,6 +433,46 @@ class MavRuntimeTests(unittest.TestCase):
             publish(8, 1, 102)
             self.assertFalse(completed.wait(0.05))
             self.assertEqual(handled, [7])
+            client.connection.target_system = 0
+            client.connection.target_component = 0
+            publish(7, 3, 103)
+            self.assertFalse(completed.wait(0.05))
+            self.assertEqual(handled, [7])
+        finally:
+            runtime.stop()
+
+    def test_explicit_channel_allowlists_define_dispatch_sources(self) -> None:
+        client = FakeClient([])
+        client.connection.target_system = 7
+        client.connection.target_component = 3
+        runtime = MavRuntime(
+            client=client,  # type: ignore[arg-type]
+            application_role="gcs",
+            channel_options={"source_systems": (7, 8), "source_components": (1, 3)},
+        )
+        assert runtime.peer is not None
+        assert runtime.dispatcher is not None
+        handled: list[tuple[int | None, int | None]] = []
+        completed = threading.Event()
+
+        def handle(packet: MavApplicationPacket) -> None:
+            handled.append((packet.source_system, packet.source_component))
+            completed.set()
+
+        runtime.dispatcher.register("camera.capture", handle)
+        runtime.start()
+
+        runtime.peer.packets.publish(
+            MavApplicationPacket(
+                "camera.capture",
+                source_system=8,
+                source_component=1,
+            )
+        )
+
+        try:
+            self.assertTrue(completed.wait(1.0))
+            self.assertEqual(handled, [(8, 1)])
         finally:
             runtime.stop()
 

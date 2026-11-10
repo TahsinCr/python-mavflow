@@ -111,6 +111,8 @@ class MavApplicationPeer:
         self._last_liveness_monotonic = 0.0
         self._subscriptions: list[Subscription] = []
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
+        self._channel_cleanup_pending = False
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._monitor_thread: threading.Thread | None = None
@@ -135,92 +137,117 @@ class MavApplicationPeer:
             return self._state.alive
 
     def start(self) -> None:
-        with self._lock:
-            if self._state.running:
-                return
-            if self._monitor_thread is not None and self._monitor_thread.is_alive():
-                raise RuntimeError("MAVLink application peer monitor thread is still stopping")
-            self._state = replace(
-                self._state,
-                running=True,
-                transport_available=self._transport_ready(),
-                last_error="",
-            )
-        subscriptions: list[Subscription] = []
-        channel_start_attempted = False
-        try:
-            subscriptions.append(self._channel.packets.subscribe(self._on_packet))
-            subscriptions.append(self._channel.errors.subscribe(self._on_error))
-            channel_start_attempted = True
-            self._channel.start()
-            self._stop.clear()
-            self._wake.clear()
-            monitor_thread = threading.Thread(
-                target=self._monitor,
-                name=f"MavApplicationPeer[{self._role}]",
-                daemon=True,
-            )
-            self._monitor_thread = monitor_thread
-            monitor_thread.start()
-            self._subscriptions = subscriptions
-        except Exception:
-            self._subscriptions.clear()
-            for subscription in subscriptions:
-                subscription.cancel()
-            if channel_start_attempted:
-                try:
-                    self._channel.stop()
-                except Exception as cleanup_error:
-                    self.errors.publish(cleanup_error)
-            self._monitor_thread = None
+        with self._lifecycle_lock:
             with self._lock:
-                self._state = replace(self._state, running=False)
-            raise
-        self.changed.publish(self.state)
-        self._wake.set()
-
-    def stop(self) -> None:
-        with self._lock:
-            was_running = self._state.running
-            if was_running:
+                if self._state.running:
+                    return
+                if self._monitor_thread is not None and self._monitor_thread.is_alive():
+                    raise RuntimeError("MAVLink application peer monitor thread is still stopping")
+            if self._channel_cleanup_pending:
+                self._channel.stop()
+                self._channel_cleanup_pending = False
+            with self._lock:
                 self._state = replace(
                     self._state,
-                    running=False,
-                    transport_available=False,
-                    alive=False,
-                    last_error="Application peer stopped",
+                    running=True,
+                    transport_available=self._transport_ready(),
+                    last_error="",
                 )
-                pending = tuple(self._pending.values())
-                self._pending.clear()
-                self._probes.clear()
-            else:
-                pending = ()
-            thread = self._monitor_thread
-        if not was_running and (thread is None or not thread.is_alive()):
-            return
-        self._stop.set()
-        self._wake.set()
-        for item in pending:
-            item.error = "Application peer stopped"
-            item.event.set()
-        if was_running:
-            for subscription in self._subscriptions:
-                subscription.cancel()
-            self._subscriptions.clear()
-            self._channel.stop()
-        if thread is not None and thread is not threading.current_thread():
-            thread.join(timeout=self._stop_timeout)
-            if thread.is_alive():
-                if was_running:
-                    self.changed.publish(self.state)
-                raise TimeoutError("MAVLink application peer monitor thread did not stop in time")
-        elif thread is threading.current_thread():
-            raise RuntimeError("Application peer cannot stop from its monitor thread")
-        with self._lock:
-            if self._monitor_thread is thread:
+            subscriptions: list[Subscription] = []
+            channel_start_attempted = False
+            try:
+                subscriptions.append(self._channel.packets.subscribe(self._on_packet))
+                subscriptions.append(self._channel.errors.subscribe(self._on_error))
+                channel_start_attempted = True
+                self._channel_cleanup_pending = True
+                self._channel.start()
+                self._stop.clear()
+                self._wake.clear()
+                monitor_thread = threading.Thread(
+                    target=self._monitor,
+                    name=f"MavApplicationPeer[{self._role}]",
+                    daemon=True,
+                )
+                self._monitor_thread = monitor_thread
+                monitor_thread.start()
+                self._subscriptions = subscriptions
+            except Exception:
+                self._subscriptions.clear()
+                for subscription in subscriptions:
+                    subscription.cancel()
+                if channel_start_attempted:
+                    try:
+                        self._channel.stop()
+                    except Exception as cleanup_error:
+                        self.errors.publish(cleanup_error)
+                    else:
+                        self._channel_cleanup_pending = False
                 self._monitor_thread = None
-        if was_running:
+                with self._lock:
+                    self._state = replace(self._state, running=False)
+                raise
+            self._wake.set()
             self.changed.publish(self.state)
+
+    def stop(self) -> None:
+        if self._monitor_thread is threading.current_thread():
+            raise RuntimeError("Application peer cannot stop from its monitor thread")
+        with self._lifecycle_lock:
+            with self._lock:
+                was_running = self._state.running
+                if was_running:
+                    self._state = replace(
+                        self._state,
+                        running=False,
+                        transport_available=False,
+                        alive=False,
+                        last_error="Application peer stopped",
+                    )
+                    pending = tuple(self._pending.values())
+                    self._pending.clear()
+                    self._probes.clear()
+                else:
+                    pending = ()
+                thread = self._monitor_thread
+            if (
+                not was_running
+                and not self._channel_cleanup_pending
+                and (thread is None or not thread.is_alive())
+            ):
+                return
+            self._stop.set()
+            self._wake.set()
+            for item in pending:
+                item.error = "Application peer stopped"
+                item.event.set()
+            if was_running:
+                for subscription in self._subscriptions:
+                    subscription.cancel()
+                self._subscriptions.clear()
+            channel_error: Exception | None = None
+            if self._channel_cleanup_pending:
+                try:
+                    self._channel.stop()
+                except Exception as exc:
+                    channel_error = exc
+                    self.errors.publish(exc)
+                else:
+                    self._channel_cleanup_pending = False
+            if thread is not None and thread is not threading.current_thread():
+                thread.join(timeout=self._stop_timeout)
+                if thread.is_alive():
+                    if was_running:
+                        self.changed.publish(self.state)
+                    raise TimeoutError(
+                        "MAVLink application peer monitor thread did not stop in time"
+                    )
+            with self._lock:
+                if self._monitor_thread is thread:
+                    self._monitor_thread = None
+            if was_running:
+                self.changed.publish(self.state)
+            if channel_error is not None:
+                raise channel_error
 
     def refresh_transport(self) -> None:
         """Re-evaluate transport availability without polling the serial link."""
@@ -284,7 +311,11 @@ class MavApplicationPeer:
         target_component: int | None = None,
         on_sent: Callable[[MavApplicationPacket], None] | None = None,
     ) -> MavApplicationResponse:
-        """Send a request and wait only for a response with its request ID."""
+        """Send a correlated request and wait for its response deadline.
+
+        The deadline includes synchronous sending, but cannot interrupt a send
+        blocked inside the transport; the method returns after that send ends.
+        """
 
         if not math.isfinite(timeout) or timeout <= 0:
             raise ValueError("MAVLink application request timeout must be positive and finite")
@@ -581,6 +612,34 @@ class MavApplicationPeer:
         if not 0 <= resolved <= 255:
             raise ValueError("MAVLink target system/component must be in range 0..255")
         return resolved
+
+    def _accepts_dispatch_packet(self, packet: MavApplicationPacket) -> bool:
+        """Check handler traffic against the peer's current source identity."""
+
+        target_system = self._resolve_target(self._target_system)
+        target_component = self._resolve_target(self._target_component)
+        for target, resolved, source, allowlist in (
+            (
+                self._target_system,
+                target_system,
+                packet.source_system,
+                getattr(self._channel, "_source_systems", None),
+            ),
+            (
+                self._target_component,
+                target_component,
+                packet.source_component,
+                getattr(self._channel, "_source_components", None),
+            ),
+        ):
+            if allowlist is not None:
+                if source not in allowlist:
+                    return False
+            elif callable(target) and resolved == 0:
+                return False
+            elif resolved != 0 and source != resolved:
+                return False
+        return True
 
     @staticmethod
     def _matches_source(

@@ -34,9 +34,14 @@ class MavConnection:
         self.connection_changed = EventBus[bool]()
         self.errors = EventBus[Exception]()
         self._connection: Any | None = None
+        self._pending_close: Any | None = None
         self._connection_factory = connection_factory
         self._mavutil_module = mavutil_module
         self._lifecycle_lock = threading.RLock()
+        self._state_event_lock = threading.Lock()
+        self._state_events: list[tuple[int, bool]] = []
+        self._publishing_state_events = False
+        self._state_generation = 0
         self._receive_lock = threading.Lock()
         self._send_lock = threading.Lock()
         self._sent_messages = 0
@@ -87,9 +92,18 @@ class MavConnection:
         self.connect()
 
     def connect(self) -> None:
+        state_generation: int
         with self._lifecycle_lock:
             if self._connection is not None:
                 return
+            if self._pending_close is not None:
+                pending_close = self._pending_close
+                try:
+                    pending_close.close()
+                except Exception as exc:
+                    self._publish_error(exc)
+                    raise
+                self._pending_close = None
             connection: Any | None = None
             try:
                 connection = self._create_connection()
@@ -114,11 +128,14 @@ class MavConnection:
                     try:
                         connection.close()
                     except Exception as close_error:
+                        self._pending_close = connection
                         self._publish_error(close_error)
                 self._publish_error(exc)
                 raise
             self._connection = connection
-        self.connection_changed.publish(True)
+            self._state_generation += 1
+            state_generation = self._state_generation
+        self._publish_connection_state(state_generation, True)
 
     def _wait_vehicle_heartbeat(self, connection: Any) -> Any:
         """Wait for the autopilot without accepting companion or GCS heartbeats."""
@@ -308,10 +325,10 @@ class MavConnection:
             raise
 
     def stop(self) -> None:
-        connection: Any | None = None
+        state_generation: int | None = None
         close_error: Exception | None = None
         with self._send_lock, self._receive_lock, self._lifecycle_lock:
-            connection = self._connection
+            connection = self._connection if self._connection is not None else self._pending_close
             if connection is None:
                 return
             try:
@@ -319,11 +336,47 @@ class MavConnection:
             except Exception as exc:
                 close_error = exc
             else:
-                self._connection = None
+                if self._connection is not None:
+                    self._connection = None
+                    self._state_generation += 1
+                    state_generation = self._state_generation
+                else:
+                    self._pending_close = None
         if close_error is not None:
             self._publish_error(close_error)
             raise close_error
-        self.connection_changed.publish(False)
+        if state_generation is not None:
+            self._publish_connection_state(state_generation, False)
+
+    def _publish_connection_state(self, generation: int, connected: bool) -> None:
+        with self._state_event_lock:
+            self._state_events.append((generation, connected))
+            if self._publishing_state_events:
+                return
+            self._publishing_state_events = True
+
+        publication_error: Exception | None = None
+        try:
+            while True:
+                with self._state_event_lock:
+                    if not self._state_events:
+                        self._publishing_state_events = False
+                        break
+                    event_generation, event_connected = self._state_events.pop(0)
+                with self._lifecycle_lock:
+                    is_current = event_generation == self._state_generation
+                if is_current:
+                    try:
+                        self.connection_changed.publish(event_connected)
+                    except Exception as exc:
+                        if publication_error is None:
+                            publication_error = exc
+        except BaseException:
+            with self._state_event_lock:
+                self._publishing_state_events = False
+            raise
+        if publication_error is not None:
+            raise publication_error
 
     def _create_connection(self) -> Any:
         if self._connection_factory is not None:

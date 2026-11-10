@@ -25,7 +25,7 @@ class _Message:
         return self.sequence & 0xFF
 
     def get_msgId(self) -> int:
-        return 0
+        return 0 if self.message_type == "HEARTBEAT" else 30
 
     def get_srcSystem(self) -> int:
         return 1
@@ -158,7 +158,7 @@ def main() -> None:
             / args.messages
             * 100,
             "completion_observer_count": 1,
-            "timed_region": "router start through final envelope dispatch; setup excluded",
+            "timed_region": "message release through final envelope dispatch; setup, startup, and shutdown excluded",
         },
     )
 

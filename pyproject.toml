@@ -85,7 +85,7 @@ omit = ["mavflow/_compatibility.py"]
 [tool.coverage.report]
 show_missing = true
 skip_covered = true
-fail_under = 75
+fail_under = 85
 exclude_lines = [
   "pragma: no cover",
   "@abstractmethod",

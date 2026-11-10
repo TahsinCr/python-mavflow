@@ -33,10 +33,11 @@ pyperf runs also reported host jitter; treat these files as reproducible
 workload records, not as evidence of a performance gain.
 
 The router workload times delivery through Mavflow's single-reader router from a
-preloaded in-memory queue; queue construction, router startup, and shutdown are
-outside its timed region. It does not measure a serial device, UDP stack, or
-autopilot. The codec workload encodes and reassembles one fixed-size application
-packet per operation.
+preloaded in-memory queue. Its timed interval begins when the queue is released
+and ends after the final envelope reaches its observer; queue construction,
+router startup, and shutdown are outside the timed region. It does not measure a
+serial device, UDP stack, or autopilot. The codec workload encodes and
+reassembles one fixed-size application packet per operation.
 
 Inspect metadata and statistics with `python -m pyperf show --metadata --stats
 router-run.json`. Compare a new router run with the stored suite using `python -m

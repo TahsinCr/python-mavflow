@@ -526,6 +526,13 @@ The request deadline includes synchronous sending and response waiting. Python
 cannot interrupt a transport send that is already blocking, so the call can
 return only after that send finishes and then report an expired deadline.
 
+Before dispatching a handler, Mavflow checks each packet against the peer's
+current system and component identity, including dynamically resolved targets.
+A callable target that currently resolves to `0` is unknown and rejected;
+literal `0` remains a wildcard subject to any channel source allowlist. Use
+channel source allowlists when intentionally accepting packets from multiple
+systems or components.
+
 The default response types are `system.ack` and `system.error`. The peer also
 tracks remote liveness and transport availability. Configure request deadlines
 and dispatcher capacity for the timing and workload of the application.
@@ -722,7 +729,7 @@ checks:
 python -m pip install -e ".[dev]"
 python run_tests.py
 python -m coverage run --branch -m unittest discover -s tests -v
-python -m coverage report --fail-under=75
+python -m coverage report --fail-under=85
 python -m ruff check .
 python -m ruff format --check .
 python -m pyright

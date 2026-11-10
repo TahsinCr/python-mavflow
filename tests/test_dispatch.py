@@ -22,6 +22,10 @@ class _DispatchPeer:
         self.send_error: Exception | None = None
         self.response_sent = threading.Event()
 
+    @staticmethod
+    def _accepts_dispatch_packet(_packet: MavApplicationPacket) -> bool:
+        return True
+
     def send(
         self,
         packet_type: str,

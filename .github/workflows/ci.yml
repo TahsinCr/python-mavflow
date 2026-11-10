@@ -40,7 +40,7 @@ jobs:
       - run: python -m ruff format --check .
       - run: python -m pyright
       - run: python -m coverage run --branch -m unittest discover -s tests -v
-      - run: python -m coverage report --fail-under=75
+      - run: python -m coverage report --fail-under=85
       - name: Smoke benchmark entry points
         run: |
           python -m benchmarks.benchmark_router --messages 64 --subscribers 10 --fast --processes 1 --output "$RUNNER_TEMP/mavflow-router-smoke.json"

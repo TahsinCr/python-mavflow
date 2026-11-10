@@ -208,6 +208,8 @@ class MavApplicationDispatcher:
     def dispatch(self, packet: MavApplicationPacket) -> bool:
         """Queue one packet for its registered handler."""
 
+        if not self._peer._accepts_dispatch_packet(packet):
+            return False
         if packet.packet_type in self.RESERVED_TYPES:
             return False
         with self._lock:

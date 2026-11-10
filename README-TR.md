@@ -527,6 +527,13 @@ Request deadline'ı senkron gönderim ve yanıt bekleme süresinin tamamını ka
 Bloklanan transport gönderimini Python kesemez; çağrı gönderim tamamlandıktan
 sonra deadline'ın dolduğunu bildirir.
 
+Mavflow handler'a vermeden önce her paketin kaynağını peer'ın güncel system ve
+component kimliğiyle doğrular; dinamik hedefler de bu kontrole dahildir.
+Callable hedef o anda `0` döndürürse kimlik bilinmiyor kabul edilir ve paket
+reddedilir; doğrudan verilen `0`, varsa channel kaynak allowlist'leriyle
+sınırlandırılmış wildcard anlamını korur. Birden fazla system veya component'ten
+paket kabul etmek istiyorsanız channel kaynak allowlist'lerini kullanın.
+
 <a id="remote-logs"></a>
 ### Uzak log modelleri
 
@@ -720,7 +727,7 @@ kullanır. Geliştirme bağımlılıklarını kurup kontrolleri proje kökünden
 python -m pip install -e ".[dev]"
 python run_tests.py
 python -m coverage run --branch -m unittest discover -s tests -v
-python -m coverage report --fail-under=75
+python -m coverage report --fail-under=85
 python -m ruff check .
 python -m ruff format --check .
 python -m pyright

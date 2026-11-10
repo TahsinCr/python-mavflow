@@ -68,6 +68,19 @@ All notable changes to Mavflow are documented here.
 - Roll back partial peer and dispatcher startup, prevent direct router
   restart during connection cleanup, and count request send time against its
   monotonic deadline.
+- Recheck application packet source identity before dispatching handlers,
+  including dynamic runtime targets, and reject callable targets whose peer
+  identity is not yet known.
+- Serialize direct peer start/stop transitions and retry application-channel
+  cleanup after a failed stop.
+- Retain transports whose connection-start rollback could not close them, so a
+  later stop or connect can retry cleanup without reporting a false connection.
+- Deliver connection state events in transition order across concurrent
+  connect/stop calls.
+- Raise the branch coverage gate from 75% to 85% and document that request
+  deadlines cannot interrupt a synchronous transport send already in progress.
+- Use the correct MAVLink message IDs in router benchmark fakes and report the
+  measured router interval accurately.
 - Preflight the complete application response, including correlation metadata,
   before sending it.
 - Refresh pyperf router and codec result files against the current source.

@@ -16,6 +16,12 @@ FINGERPRINT_PATTERN = re.compile(r"^[0-9a-f]{64}$")
 
 
 class BenchmarkMetadataTests(unittest.TestCase):
+    def test_router_fake_messages_use_their_mavlink_message_ids(self) -> None:
+        from benchmarks.benchmark_router import _Message
+
+        self.assertEqual(_Message(1, "HEARTBEAT").get_msgId(), 0)
+        self.assertEqual(_Message(2, "ATTITUDE").get_msgId(), 30)
+
     def test_source_fingerprint_tracks_code_and_ignores_result_files(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -75,6 +81,7 @@ class PyperfRunnerTests(unittest.TestCase):
                     "matching_messages_per_batch": 5,
                     "effective_matching_ratio_percent": 50.0,
                     "completion_observer_count": 1,
+                    "timed_region": "message release through final envelope dispatch; setup, startup, and shutdown excluded",
                 },
             ),
             (

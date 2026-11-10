@@ -4,6 +4,7 @@ import math
 import queue
 import sys
 import threading
+import time
 import unittest
 from types import ModuleType, SimpleNamespace
 from typing import Any
@@ -352,6 +353,94 @@ class ConnectionTests(unittest.TestCase):
 
         self.assertEqual(changes, [True, False])
         self.assertEqual(raw.closed, 1)
+
+    def test_connection_state_events_keep_transition_order_during_concurrent_stop(self) -> None:
+        raw = _RawConnection(["vehicle"])
+        connection = MavConnection(
+            MavEndpoint(),
+            connection_factory=lambda _endpoint: raw,
+        )
+        events: list[bool] = []
+        connected_event_entered = threading.Event()
+        release_connected_event = threading.Event()
+        start_errors: list[Exception] = []
+        stop_errors: list[Exception] = []
+        stop_completed = threading.Event()
+
+        def record_state(connected: bool) -> None:
+            events.append(connected)
+            if connected:
+                connected_event_entered.set()
+                if not release_connected_event.wait(1.0):
+                    raise TimeoutError("connection state subscriber was not released")
+
+        connection.connection_changed.subscribe(record_state)
+
+        def start() -> None:
+            try:
+                connection.start()
+            except Exception as exc:
+                start_errors.append(exc)
+
+        def stop() -> None:
+            try:
+                connection.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+            finally:
+                stop_completed.set()
+
+        starting = threading.Thread(target=start)
+        starting.start()
+        self.assertTrue(connected_event_entered.wait(1.0))
+        stopping = threading.Thread(target=stop)
+        stopping.start()
+        deadline = time.monotonic() + 1.0
+        while connection.is_connected and time.monotonic() < deadline:
+            time.sleep(0.001)
+        self.assertFalse(connection.is_connected)
+        self.assertTrue(stop_completed.wait(1.0))
+        release_connected_event.set()
+        starting.join(1.0)
+        stopping.join(1.0)
+
+        self.assertFalse(starting.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(start_errors, [])
+        self.assertEqual(stop_errors, [])
+        self.assertEqual(events, [True, False])
+        self.assertFalse(connection.is_connected)
+
+    def test_connect_rollback_retains_transport_when_close_needs_retry(self) -> None:
+        class RetryCloseConnection(_RawConnection):
+            def __init__(self) -> None:
+                super().__init__([])
+                self.close_calls = 0
+
+            def close(self) -> None:
+                self.close_calls += 1
+                if self.close_calls == 1:
+                    raise OSError("first close failed")
+                super().close()
+
+        raw = RetryCloseConnection()
+        connection = MavConnection(
+            MavEndpoint(heartbeat_timeout=0.01),
+            connection_factory=lambda _endpoint: raw,
+        )
+
+        with self.assertRaises(TimeoutError):
+            connection.start()
+
+        self.assertFalse(connection.is_connected)
+        self.assertIs(connection._pending_close, raw)
+        self.assertEqual(raw.close_calls, 1)
+
+        connection.stop()
+
+        self.assertEqual(raw.close_calls, 2)
+        self.assertEqual(raw.closed, 1)
+        self.assertIsNone(connection._pending_close)
 
     def test_connect_failure_closes_partial_transport_and_publishes_error(self) -> None:
         raw = _RawConnection([])

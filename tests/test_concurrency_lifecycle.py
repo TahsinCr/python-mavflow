@@ -250,6 +250,88 @@ class PeerLifecycleTests(unittest.TestCase):
             **peer_options,
         )
 
+    def test_concurrent_start_and_stop_are_serialized(self) -> None:
+        class BlockingStartChannel(_ChannelStub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.start_entered = threading.Event()
+                self.release_start = threading.Event()
+
+            def start(self) -> None:
+                self.start_entered.set()
+                if not self.release_start.wait(1.0):
+                    raise TimeoutError("channel start was not released")
+                super().start()
+
+        channel = BlockingStartChannel()
+        peer = self._peer(channel)
+        start_errors: list[Exception] = []
+        stop_errors: list[Exception] = []
+        stop_entered = threading.Event()
+        stop_completed = threading.Event()
+
+        def start_peer() -> None:
+            try:
+                peer.start()
+            except Exception as exc:
+                start_errors.append(exc)
+
+        def stop_peer() -> None:
+            stop_entered.set()
+            try:
+                peer.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+            finally:
+                stop_completed.set()
+
+        starting = threading.Thread(target=start_peer)
+        starting.start()
+        self.assertTrue(channel.start_entered.wait(1.0))
+        stopping = threading.Thread(target=stop_peer)
+        stopping.start()
+        self.assertTrue(stop_entered.wait(1.0))
+        channel.release_start.set()
+        starting.join(1.0)
+        stopping.join(1.0)
+
+        self.assertFalse(starting.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertTrue(stop_completed.is_set())
+        self.assertEqual(start_errors, [])
+        self.assertEqual(stop_errors, [])
+        self.assertFalse(peer.running)
+        self.assertFalse(channel.started)
+        self.assertEqual(peer._subscriptions, [])
+        self.assertIsNone(peer._monitor_thread)
+
+    def test_channel_stop_failure_is_retried_by_idempotent_peer_stop(self) -> None:
+        class RetryStopChannel(_ChannelStub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stop_calls = 0
+
+            def stop(self) -> None:
+                self.stop_calls += 1
+                if self.stop_calls == 1:
+                    raise OSError("channel stop failed")
+                super().stop()
+
+        channel = RetryStopChannel()
+        peer = self._peer(channel)
+        peer.start()
+
+        with self.assertRaisesRegex(OSError, "channel stop failed"):
+            peer.stop()
+        self.assertFalse(peer.running)
+        self.assertTrue(channel.started)
+
+        peer.stop()
+
+        self.assertEqual(channel.stop_calls, 2)
+        self.assertFalse(channel.started)
+        self.assertFalse(peer._channel_cleanup_pending)
+
     def test_stop_wakes_pending_request_and_prevents_later_packets(self) -> None:
         channel = _ChannelStub()
         peer = self._peer(channel)
@@ -605,8 +687,48 @@ class PeerLifecycleTests(unittest.TestCase):
         while peer.alive and time.monotonic() < deadline:
             time.sleep(0.01)
         peer.stop()
-
         self.assertFalse(peer.alive)
+
+    def test_request_timeout_cannot_interrupt_a_blocking_transport_send(self) -> None:
+        class BlockingSendChannel(_ChannelStub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.send_entered = threading.Event()
+                self.release_send = threading.Event()
+
+            def send(self, *args: Any, **kwargs: Any) -> MavApplicationPacket:
+                self.send_entered.set()
+                if not self.release_send.wait(1.0):
+                    raise TimeoutError("transport send was not released")
+                return super().send(*args, **kwargs)
+
+        channel = BlockingSendChannel()
+        peer = self._peer(channel, target_system=7, target_component=3)
+        peer.start()
+        errors: list[Exception] = []
+
+        def request() -> None:
+            try:
+                peer.request(
+                    "camera.capture",
+                    response_types="system.ack",
+                    timeout=0.02,
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        requester = threading.Thread(target=request)
+        requester.start()
+        self.assertTrue(channel.send_entered.wait(1.0))
+        time.sleep(0.03)
+        self.assertTrue(requester.is_alive())
+        channel.release_send.set()
+        requester.join(1.0)
+
+        self.assertFalse(requester.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], TimeoutError)
+        peer.stop()
 
 
 class _PeerStub:
@@ -616,6 +738,10 @@ class _PeerStub:
 
     def send(self, packet_type: str, payload: Any, **_targets: Any) -> None:
         self.sent.append((packet_type, dict(payload)))
+
+    @staticmethod
+    def _accepts_dispatch_packet(_packet: MavApplicationPacket) -> bool:
+        return True
 
 
 class DispatcherLifecycleTests(unittest.TestCase):
