@@ -26,10 +26,7 @@ class FakeConnection:
 
 class FakeRouter:
     def __init__(self) -> None:
-        self.messages = EventBus[Any](
-            history=32,
-            routing_key=lambda event: event.message_type,
-        )
+        self.messages = EventBus[Any](history=32)
         self.errors = EventBus[Any]()
 
     @property
@@ -179,6 +176,59 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertFalse(runtime.running)
         runtime.close()
 
+    def test_start_and_stop_are_serialized_across_the_full_transition(self) -> None:
+        calls: list[str] = []
+        entered = threading.Event()
+        release = threading.Event()
+        stop_started = threading.Event()
+        stop_finished = threading.Event()
+        failures: list[Exception] = []
+
+        class BlockingClient(FakeClient):
+            def start(self) -> None:
+                calls.append("client:start:entered")
+                entered.set()
+                if not release.wait(1.0):
+                    raise TimeoutError("test did not release runtime start")
+                self.is_connected = True
+                calls.append("client:start:complete")
+
+        client = BlockingClient(calls)
+        runtime = MavRuntime(client=client)  # type: ignore[arg-type]
+
+        def start() -> None:
+            try:
+                runtime.start()
+            except Exception as exc:
+                failures.append(exc)
+
+        def stop() -> None:
+            stop_started.set()
+            try:
+                runtime.stop()
+            except Exception as exc:
+                failures.append(exc)
+            finally:
+                stop_finished.set()
+
+        starter = threading.Thread(target=start)
+        stopper = threading.Thread(target=stop)
+        starter.start()
+        self.assertTrue(entered.wait(1.0))
+        stopper.start()
+        self.assertTrue(stop_started.wait(1.0))
+        self.assertFalse(stop_finished.wait(0.05))
+        release.set()
+        starter.join(1.0)
+        stopper.join(1.0)
+
+        self.assertFalse(starter.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(failures)
+        self.assertLess(calls.index("client:start:complete"), calls.index("client:stop"))
+        self.assertFalse(runtime.running)
+        runtime.close()
+
     def test_request_requires_and_forwards_to_application_peer(self) -> None:
         calls: list[str] = []
         peer = FakePeer(calls)
@@ -223,7 +273,10 @@ class MavRuntimeTests(unittest.TestCase):
             dispatcher=dispatcher,  # type: ignore[arg-type]
         )
         received: list[Any] = []
-        runtime.messages.once(received.append, routing_key="HEARTBEAT")
+        runtime.messages.once(
+            received.append,
+            event_filter=EventFilter(predicate=lambda event: event.message_type == "HEARTBEAT"),
+        )
 
         first = SimpleNamespace(message_type="HEARTBEAT", message="first")
         second = SimpleNamespace(message_type="HEARTBEAT", message="second")
@@ -234,7 +287,10 @@ class MavRuntimeTests(unittest.TestCase):
         client.router.messages.publish(latest)
         publisher = threading.Timer(0.01, lambda: client.router.messages.publish(waited))
         publisher.start()
-        received_wait = runtime.messages.wait_for(routing_key="GPS_RAW_INT", timeout=1.0)
+        received_wait = runtime.messages.wait_for(
+            event_filter=EventFilter(predicate=lambda event: event.message_type == "GPS_RAW_INT"),
+            timeout=1.0,
+        )
         publisher.join(timeout=1.0)
         packet = runtime.notify("mission.status", {"ready": True})
         runtime.handle("mission.start", lambda _packet: None)
@@ -283,7 +339,12 @@ class MavRuntimeTests(unittest.TestCase):
 
     def test_application_role_builds_default_stack_without_connecting(self) -> None:
         runtime = MavRuntime(
-            MavEndpoint.udp("127.0.0.1", 14550),
+            MavEndpoint.udp(
+                "127.0.0.1",
+                14550,
+                expected_system=7,
+                expected_component=3,
+            ),
             application_role="vehicle",
         )
 
@@ -291,6 +352,25 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(runtime.channel)
         self.assertIsNotNone(runtime.peer)
         self.assertIsNotNone(runtime.dispatcher)
+        assert runtime.peer is not None
+        self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_system), 7)
+        self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_component), 3)
+        runtime.close()
+
+    def test_application_role_accepts_explicit_peer_and_source_identity(self) -> None:
+        runtime = MavRuntime(
+            client=FakeClient([]),  # type: ignore[arg-type]
+            application_role="gcs",
+            peer_options={"target_system": 7, "target_component": 3},
+            channel_options={"source_systems": 7, "source_components": 3},
+        )
+
+        assert runtime.peer is not None
+        assert runtime.channel is not None
+        self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_system), 7)
+        self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_component), 3)
+        self.assertEqual(runtime.channel._source_systems, frozenset({7}))
+        self.assertEqual(runtime.channel._source_components, frozenset({3}))
         runtime.close()
 
     def test_failed_shutdown_is_reported_and_can_be_retried(self) -> None:
@@ -306,8 +386,9 @@ class MavRuntimeTests(unittest.TestCase):
         runtime.start()
 
         with self.assertRaises(ExceptionGroup):
-            runtime.stop()
+            runtime.close()
         self.assertIn("client:stop", calls)
+        self.assertTrue(runtime.events.running)
 
         runtime.close()
         self.assertFalse(runtime.events.running)

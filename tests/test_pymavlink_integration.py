@@ -51,11 +51,14 @@ class PymavlinkUdpIntegrationTests(unittest.TestCase):
         sender_thread = threading.Thread(target=send_heartbeats, daemon=True)
         sender_thread.start()
         boundary = router.sequence
-        next_envelope = EventFilter(predicate=lambda envelope: envelope.sequence > boundary)
+        next_envelope = EventFilter(
+            predicate=lambda envelope: (
+                envelope.message_type == "HEARTBEAT" and envelope.sequence > boundary
+            )
+        )
         try:
             router.start()
             envelope = router.messages.wait_for(
-                routing_key="HEARTBEAT",
                 event_filter=next_envelope,
                 timeout=2.0,
             )

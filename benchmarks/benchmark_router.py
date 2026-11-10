@@ -6,6 +6,8 @@ import queue
 import threading
 import time
 
+from eventflow import EventFilter
+
 from mavflow import MavMessageRouter
 
 from ._runner import create_runner, positive_integer
@@ -52,7 +54,7 @@ class _Connection:
         return True
 
 
-def _sample(messages_per_batch: int) -> float:
+def _sample(messages_per_batch: int, subscriber_count: int) -> float:
     messages: queue.Queue[_Message] = queue.Queue(maxsize=messages_per_batch)
     for sequence in range(messages_per_batch):
         messages.put(_Message(sequence))
@@ -65,26 +67,34 @@ def _sample(messages_per_batch: int) -> float:
     def receive(_envelope: object) -> None:
         nonlocal delivered
         delivered += 1
-        if delivered == messages_per_batch:
+        if delivered == messages_per_batch * subscriber_count:
             completed.set()
 
-    router.messages.subscribe(receive, routing_key="HEARTBEAT")
+    for _ in range(subscriber_count):
+        router.messages.subscribe(
+            receive,
+            event_filter=EventFilter(
+                predicate=lambda envelope: envelope.message_type == "HEARTBEAT"
+            ),
+        )
     router.start()
     started = time.perf_counter()
     release.set()
     try:
         if not completed.wait(30.0):
-            raise TimeoutError(f"Router delivered {delivered} of {messages_per_batch} messages")
+            expected = messages_per_batch * subscriber_count
+            raise TimeoutError(f"Router delivered {delivered} of {expected} callbacks")
         elapsed = time.perf_counter() - started
     finally:
         router.stop()
-    if delivered != messages_per_batch:
-        raise RuntimeError(f"Router delivered {delivered} of {messages_per_batch} messages")
+    expected = messages_per_batch * subscriber_count
+    if delivered != expected:
+        raise RuntimeError(f"Router delivered {delivered} of {expected} callbacks")
     return elapsed
 
 
-def _time_batches(loops: int, messages_per_batch: int) -> float:
-    return sum(_sample(messages_per_batch) for _ in range(loops))
+def _time_batches(loops: int, messages_per_batch: int, subscriber_count: int) -> float:
+    return sum(_sample(messages_per_batch, subscriber_count) for _ in range(loops))
 
 
 def main() -> None:
@@ -95,16 +105,24 @@ def main() -> None:
         default=1_000,
         help="messages routed in each timed batch",
     )
+    runner.argparser.add_argument(
+        "--subscribers",
+        type=positive_integer,
+        default=1,
+        help="matching EventFlow callbacks receiving each message",
+    )
     args = runner.parse_args()
     runner.bench_time_func(
         "router_receive_and_dispatch",
         _time_batches,
         args.messages,
+        args.subscribers,
         inner_loops=args.messages,
         metadata={
             "transport": "preloaded in-memory fake connection",
             "message_type": "HEARTBEAT",
             "messages_per_batch": args.messages,
+            "subscriber_count": args.subscribers,
             "timed_region": "router start through final callback; setup excluded",
         },
     )

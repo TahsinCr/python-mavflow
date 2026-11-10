@@ -60,18 +60,16 @@ class PyperfRunnerTests(unittest.TestCase):
         benchmarks = (
             (
                 "benchmarks.benchmark_router",
-                ("--messages", "2"),
-                "messages_per_batch",
-                2,
+                ("--messages", "2", "--subscribers", "4"),
+                {"messages_per_batch": 2, "subscriber_count": 4},
             ),
             (
                 "benchmarks.benchmark_codec",
                 ("--payload-bytes", "32"),
-                "payload_bytes",
-                32,
+                {"payload_bytes": 32},
             ),
         )
-        for module, workload_args, metadata_key, expected_value in benchmarks:
+        for module, workload_args, expected_metadata in benchmarks:
             with self.subTest(module=module), tempfile.TemporaryDirectory() as temporary_directory:
                 output = Path(temporary_directory) / "benchmark.json"
                 result = subprocess.run(
@@ -101,7 +99,8 @@ class PyperfRunnerTests(unittest.TestCase):
                 report = json.loads(output.read_text(encoding="utf-8"))
 
             metadata = report["metadata"]
-            self.assertEqual(metadata[metadata_key], expected_value)
+            for key, value in expected_metadata.items():
+                self.assertEqual(metadata[key], value)
             self.assertRegex(metadata["mavflow_source_fingerprint_sha256"], FINGERPRINT_PATTERN)
             self.assertTrue(report["benchmarks"])
 

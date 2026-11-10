@@ -6,7 +6,7 @@ from typing import Any
 
 from eventflow import EventBus
 
-from mavflow.application import MavApplicationPacket
+from mavflow.application import MavApplicationPacket, MavApplicationProtocolError
 from mavflow.dispatch import MavApplicationDispatcher, MavApplicationHandlerRegistry
 
 
@@ -154,6 +154,32 @@ class DispatcherContractTests(unittest.TestCase):
         self.assertEqual(len(errors), 2)
         self.assertIsInstance(errors[0], ValueError)
         self.assertIsInstance(errors[1], TypeError)
+
+    def test_oversized_handler_response_is_reported_as_a_failed_result(self) -> None:
+        peer = _DispatchPeer()
+        dispatcher = MavApplicationDispatcher(peer)  # type: ignore[arg-type]
+        handled: list[Any] = []
+        errors: list[Exception] = []
+        completed = threading.Event()
+        dispatcher.handled.subscribe(lambda event: (handled.append(event), completed.set()))
+        dispatcher.errors.subscribe(errors.append)
+        dispatcher.register("camera.large", lambda _packet: {"data": "x" * 20_000})
+        dispatcher.start()
+        self.addCleanup(dispatcher.stop)
+
+        self.assertTrue(
+            dispatcher.dispatch(
+                MavApplicationPacket("camera.large", packet_id=89, expects_response=True)
+            )
+        )
+        self.assertTrue(completed.wait(1.0))
+        self.assertTrue(peer.response_sent.wait(1.0))
+
+        self.assertFalse(handled[0].result.accepted)
+        self.assertEqual(peer.sent[0][0], "system.error")
+        self.assertEqual(peer.sent[0][1]["request_id"], 89)
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], MavApplicationProtocolError)
 
     def test_response_send_failures_are_published_without_losing_dispatch_result(self) -> None:
         peer = _DispatchPeer()

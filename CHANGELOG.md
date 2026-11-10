@@ -4,10 +4,21 @@ All notable changes to Mavflow are documented here.
 
 ## [Unreleased]
 
+### Added
+
+- Measure router callback fan-out with a configurable number of matching
+  EventFlow subscribers in the pyperf router benchmark.
+- Configure optional MAVLink 2 signing on `MavEndpoint` before heartbeat
+  discovery and keep signing keys out of endpoint representations.
+- Filter initial heartbeat discovery by optional expected system/component IDs
+  and use those IDs as the runtime peer's default target.
+- Use the released EventFlow 1.3.2 API directly: message-type filters use
+  `EventFilter` predicates, and `AsyncEventQueue` buffers all envelope types.
+
 ### Changed
 
 - Route envelopes from the extracted [Vehicle Autonomy Core MAVLink source](https://github.com/TahsinCr/vehicle-autonomy-core/tree/main/mavlink)
-  through EventFlow's indexed `EventBus` and expose
+  through EventFlow's `EventBus` and expose
   EventFlow's native `EventEngine`, `EventFilter`, `EventHistory`, and
   `AsyncEventQueue` APIs directly. Mavflow 2.0 removes its duplicate message
   filter, cache, async channel, and subscription/wait facades without
@@ -27,11 +38,29 @@ All notable changes to Mavflow are documented here.
   channels instead.
 - Remove duplicate peer packet publication; the peer exposes the application
   channel's EventFlow packet bus directly.
+- Remove dispatcher thread-name configuration because EventFlow 1.3.2 owns
+  worker naming through `BoundedWorkPool`.
 
 ### Fixed
 
-- Install EventFlow 1.4.0 from its pinned upstream commit in GitHub Actions while
-  that required version is not yet available on PyPI.
+- Require the published EventFlow 1.3.2 release and install it through normal
+  package resolution in local environments and GitHub Actions.
+- Validate application peer responses against the destination system and
+  component IDs, and ignore unrelated peers for liveness and probe state.
+- Allow runtime `peer_options` to specify an expected peer system/component
+  before starting the connection.
+- Keep router processing alive when an envelope or delivery-quality update
+  fails, and report those failures through the router error bus.
+- Serialize runtime lifecycle transitions and leave the EventFlow engine open
+  when component cleanup has not completed.
+- Reject malformed application packet fields, nonzero reserved header flags,
+  and oversized remote-log batches before constructing their records.
+- Bound fragment assemblies per MAVLink source and ignore out-of-order packets
+  when estimating sequence loss.
+- Validate finite timeout values and handler response payloads before reporting
+  them as handled.
+- Document that pymavlink condition expressions must come from trusted code,
+  and that `is_connected` reports an open raw connection rather than peer health.
 
 ## [v1.0] - 2026-11-09
 

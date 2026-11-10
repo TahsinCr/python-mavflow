@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import threading
 import time
 from collections import deque
@@ -25,6 +26,7 @@ class MavRouterStats:
     delivery_quality: int | None
     started_monotonic: float | None
     last_message_monotonic: float | None
+    processing_errors: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -48,17 +50,14 @@ class MavMessageRouter:
     ) -> None:
         if history_limit <= 0:
             raise ValueError("history_limit pozitif olmalı")
-        if poll_timeout <= 0:
-            raise ValueError("poll_timeout pozitif olmalı")
-        if error_backoff < 0:
-            raise ValueError("error_backoff negatif olamaz")
-        if stop_timeout <= 0:
-            raise ValueError("stop_timeout pozitif olmalı")
+        if not math.isfinite(poll_timeout) or poll_timeout <= 0:
+            raise ValueError("poll_timeout pozitif ve sonlu olmalı")
+        if not math.isfinite(error_backoff) or error_backoff < 0:
+            raise ValueError("error_backoff sonlu ve negatif olmayan bir değer olmalı")
+        if not math.isfinite(stop_timeout) or stop_timeout <= 0:
+            raise ValueError("stop_timeout pozitif ve sonlu olmalı")
         self.connection = connection
-        self.messages = EventBus[MavMessageEnvelope](
-            history=history_limit,
-            routing_key=lambda envelope: envelope.message_type,
-        )
+        self.messages = EventBus[MavMessageEnvelope](history=history_limit)
         self.errors = EventBus[MavRouterError]()
         self._poll_timeout = poll_timeout
         self._error_backoff = error_backoff
@@ -69,6 +68,7 @@ class MavMessageRouter:
         self._received_messages = 0
         self._receive_errors = 0
         self._dispatch_errors = 0
+        self._processing_errors = 0
         self._estimated_dropped_messages = 0
         self._source_sequences: dict[tuple[int, int], int] = {}
         self._delivery_window: deque[tuple[int, int]] = deque(maxlen=256)
@@ -102,6 +102,7 @@ class MavMessageRouter:
                 delivery_quality=self._delivery_quality(),
                 started_monotonic=self._started_monotonic,
                 last_message_monotonic=self._last_message_monotonic,
+                processing_errors=self._processing_errors,
             )
 
     def start(self) -> None:
@@ -172,15 +173,33 @@ class MavMessageRouter:
                     continue
                 with self._condition:
                     self._sequence += 1
-                    envelope = MavMessageEnvelope.wrap(self._sequence, message)
+                    sequence = self._sequence
+                try:
+                    envelope = MavMessageEnvelope.wrap(sequence, message)
+                except Exception as exc:
+                    self._report_processing_error("envelope", exc)
+                    continue
+                quality_error: Exception | None = None
+                with self._condition:
                     self._received_messages += 1
-                    self._record_delivery(envelope)
+                    try:
+                        self._record_delivery(envelope)
+                    except Exception as exc:
+                        self._processing_errors += 1
+                        quality_error = exc
                     self._last_message_monotonic = envelope.received_monotonic
+                if quality_error is not None:
+                    self.errors.publish(MavRouterError("quality", quality_error, envelope))
                 self._dispatch(envelope)
         finally:
             with self._condition:
                 self._running = False
                 self._condition.notify_all()
+
+    def _report_processing_error(self, phase: str, error: Exception) -> None:
+        with self._condition:
+            self._processing_errors += 1
+        self.errors.publish(MavRouterError(phase, error))
 
     def _record_delivery(self, envelope: MavMessageEnvelope) -> None:
         source_system = envelope.source_system
@@ -190,13 +209,15 @@ class MavMessageRouter:
             return
         key = (source_system, source_component)
         previous = self._source_sequences.get(key)
-        self._source_sequences[key] = sequence
         if previous is None:
+            self._source_sequences[key] = sequence
             self._delivery_window.append((1, 0))
             return
         delta = (sequence - previous) & 0xFF
-        # Backward jumps larger than 64 indicate restart or reordering, not loss.
-        dropped = delta - 1 if 1 < delta <= 64 else 0
+        if not 0 < delta <= 64:
+            return
+        self._source_sequences[key] = sequence
+        dropped = delta - 1
         self._estimated_dropped_messages += dropped
         self._delivery_window.append((1, dropped))
 
@@ -224,7 +245,11 @@ class MavMessageRouter:
             return None
 
     def _dispatch(self, envelope: MavMessageEnvelope) -> None:
-        for error in self.messages.publish(envelope).errors:
+        try:
+            errors = self.messages.publish(envelope).errors
+        except Exception as exc:
+            errors = (exc,)
+        for error in errors:
             with self._condition:
                 self._dispatch_errors += 1
             self.errors.publish(MavRouterError("dispatch", error, envelope))

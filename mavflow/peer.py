@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import secrets
 import threading
 import time
@@ -48,6 +49,8 @@ class _PendingRequest:
     event: threading.Event
     response_types: frozenset[str]
     started_monotonic: float
+    target_system: int
+    target_component: int
     response: MavApplicationPacket | None = None
     error: str = ""
 
@@ -79,12 +82,17 @@ class MavApplicationPeer:
         normalized_role = str(role).strip().lower()
         if not normalized_role:
             raise ValueError("MAVLink application peer role cannot be empty")
-        if heartbeat_interval <= 0 or heartbeat_timeout <= 0:
-            raise ValueError("MAVLink application peer timeouts must be positive")
+        if (
+            not math.isfinite(heartbeat_interval)
+            or not math.isfinite(heartbeat_timeout)
+            or heartbeat_interval <= 0
+            or heartbeat_timeout <= 0
+        ):
+            raise ValueError("MAVLink application peer timeouts must be positive and finite")
         if heartbeat_interval >= heartbeat_timeout:
             raise ValueError("Heartbeat interval must be shorter than its timeout")
-        if stop_timeout <= 0:
-            raise ValueError("MAVLink application peer stop timeout must be positive")
+        if not math.isfinite(stop_timeout) or stop_timeout <= 0:
+            raise ValueError("MAVLink application peer stop timeout must be positive and finite")
 
         self._channel = channel
         self._role = normalized_role
@@ -97,7 +105,7 @@ class MavApplicationPeer:
         self._stop_timeout = float(stop_timeout)
         self._state = MavApplicationPeerState()
         self._pending: dict[int, _PendingRequest] = {}
-        self._probes: dict[int, float] = {}
+        self._probes: dict[int, tuple[float, int, int]] = {}
         self._last_liveness_monotonic = 0.0
         self._subscriptions: list[Subscription] = []
         self._lock = threading.RLock()
@@ -268,14 +276,22 @@ class MavApplicationPeer:
     ) -> MavApplicationResponse:
         """Send a request and wait only for a response with its request ID."""
 
-        if timeout <= 0:
-            raise ValueError("MAVLink application request timeout must be positive")
+        if not math.isfinite(timeout) or timeout <= 0:
+            raise ValueError("MAVLink application request timeout must be positive and finite")
         normalized_responses = self._normalize_types(response_types)
+        expected_system = self._resolve_target(
+            self._target_system if target_system is None else target_system
+        )
+        expected_component = self._resolve_target(
+            self._target_component if target_component is None else target_component
+        )
         packet_id = self._reserve_packet_id()
         pending = _PendingRequest(
             threading.Event(),
             normalized_responses,
             time.monotonic(),
+            expected_system,
+            expected_component,
         )
         with self._lock:
             if not self._state.running:
@@ -286,8 +302,8 @@ class MavApplicationPeer:
                 packet_type,
                 payload,
                 packet_id=packet_id,
-                target_system=target_system,
-                target_component=target_component,
+                target_system=expected_system,
+                target_component=expected_component,
                 expects_response=True,
             )
             if on_sent is not None:
@@ -318,13 +334,17 @@ class MavApplicationPeer:
         probe_payload.setdefault("role", self._role)
         probe_payload.setdefault("health", "ok")
         probe_id = self._reserve_packet_id()
+        target_system = self._resolve_target(self._target_system)
+        target_component = self._resolve_target(self._target_component)
         with self._lock:
-            self._probes[probe_id] = time.monotonic()
+            self._probes[probe_id] = (time.monotonic(), target_system, target_component)
         try:
             return self.send(
                 "system.ping",
                 probe_payload,
                 packet_id=probe_id,
+                target_system=target_system,
+                target_component=target_component,
             )
         except Exception:
             with self._lock:
@@ -338,19 +358,41 @@ class MavApplicationPeer:
         with self._lock:
             if not self._state.running:
                 return
-            liveness = packet.packet_type in self.LIVENESS_TYPES
+            peer_matches = self._matches_source(
+                packet,
+                self._resolve_target(self._target_system),
+                self._resolve_target(self._target_component),
+            )
+            pending = self._pending.get(response_to) if response_to is not None else None
+            pending_matches = pending is not None and self._matches_source(
+                packet,
+                pending.target_system,
+                pending.target_component,
+            )
+            probe = self._probes.get(response_to) if response_to is not None else None
+            probe_matches = probe is not None and self._matches_source(packet, probe[1], probe[2])
+            if not peer_matches and not pending_matches:
+                return
+            liveness = peer_matches and packet.packet_type in self.LIVENESS_TYPES
             if liveness:
                 self._last_liveness_monotonic = now_monotonic
             round_trip_ms = self._state.round_trip_ms
-            probe_started = (
+            probe_started = None
+            if (
+                packet.packet_type == "system.pong"
+                and response_to is not None
+                and probe is not None
+                and probe_matches
+            ):
+                probe_started = probe[0]
                 self._probes.pop(response_to, None)
-                if packet.packet_type == "system.pong" and response_to is not None
-                else None
-            )
             if probe_started is not None:
                 round_trip_ms = max(0.0, (now_monotonic - probe_started) * 1000.0)
-            pending = self._pending.get(response_to) if response_to is not None else None
-            if pending is not None and packet.packet_type in pending.response_types:
+            if (
+                pending_matches
+                and pending is not None
+                and packet.packet_type in pending.response_types
+            ):
                 pending.response = packet
                 pending.event.set()
             self._state = replace(
@@ -468,9 +510,9 @@ class MavApplicationPeer:
         deadline = now - self._heartbeat_timeout
         with self._lock:
             self._probes = {
-                packet_id: started
-                for packet_id, started in self._probes.items()
-                if started >= deadline
+                packet_id: probe
+                for packet_id, probe in self._probes.items()
+                if probe[0] >= deadline
             }
 
     def _on_error(self, error: Exception) -> None:
@@ -516,6 +558,16 @@ class MavApplicationPeer:
         if not 0 <= resolved <= 255:
             raise ValueError("MAVLink target system/component must be in range 0..255")
         return resolved
+
+    @staticmethod
+    def _matches_source(
+        packet: MavApplicationPacket,
+        target_system: int,
+        target_component: int,
+    ) -> bool:
+        return (target_system == 0 or packet.source_system == target_system) and (
+            target_component == 0 or packet.source_component == target_component
+        )
 
     @staticmethod
     def _normalize_types(

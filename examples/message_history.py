@@ -28,17 +28,17 @@ def main() -> int:
 
     endpoint = MavEndpoint.udp(args.host, args.port)
     with MavRuntime(endpoint) as runtime:
+        message_filter = EventFilter(
+            predicate=lambda item: item.message_type == args.message_type.upper()
+        )
         envelope = runtime.messages.wait_for(
-            routing_key=args.message_type.upper(),
+            event_filter=message_filter,
             timeout=args.timeout,
         )
         if envelope is None:
             print(f"No {args.message_type} message received before the timeout")
             return 1
 
-        message_filter = EventFilter(
-            predicate=lambda item: item.message_type == args.message_type.upper()
-        )
         history = runtime.messages.history
         if history is None:
             raise RuntimeError("MAVLink message history is not configured")

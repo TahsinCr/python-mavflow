@@ -66,6 +66,7 @@ def create_runner(module_name: str) -> pyperf.Runner:
 def _append_workload_arguments(command: list[str], args: argparse.Namespace) -> None:
     for attribute, option in (
         ("messages", "--messages"),
+        ("subscribers", "--subscribers"),
         ("payload_bytes", "--payload-bytes"),
     ):
         value: Any = getattr(args, attribute, None)

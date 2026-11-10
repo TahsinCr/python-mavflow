@@ -7,7 +7,7 @@ from typing import Any
 
 from eventflow import BoundedWorkPool, EventBus, Subscription
 
-from .application import MavApplicationPacket
+from .application import MavApplicationCodec, MavApplicationPacket
 from .peer import MavApplicationPeer
 
 
@@ -128,12 +128,10 @@ class MavApplicationDispatcher:
         *,
         workers: int = 1,
         max_pending: int = 64,
-        thread_name: str = "MavApplicationDispatch",
         handlers: MavApplicationHandlerRegistry | None = None,
     ) -> None:
         self._peer = peer
         self._workers = workers
-        self._thread_name = thread_name
         self._max_pending = max_pending
         self._handlers = handlers or MavApplicationHandlerRegistry()
         self._subscription: Subscription | None = None
@@ -172,7 +170,6 @@ class MavApplicationDispatcher:
             self._work_pool = BoundedWorkPool(
                 max_workers=self._workers,
                 max_pending=self._max_pending,
-                thread_name_prefix=self._thread_name,
             )
             self._subscription = self._peer.packets.subscribe(self._on_packet)
 
@@ -180,6 +177,11 @@ class MavApplicationDispatcher:
         self.dispatch(packet)
 
     def stop(self) -> None:
+        """Cancel queued work and wait for running handlers to return.
+
+        Python cannot safely interrupt a synchronous handler that is already
+        running; handlers must bound their own blocking I/O and loops.
+        """
         with self._lock:
             subscription = self._subscription
             self._subscription = None
@@ -272,6 +274,21 @@ class MavApplicationDispatcher:
                 str(exc),
                 {"error_type": exc.__class__.__name__},
             )
+        if error is None and packet.expects_response:
+            try:
+                MavApplicationCodec.encode(
+                    MavApplicationPacket(
+                        result.response_type,
+                        result.payload,
+                        packet_id=1,
+                    )
+                )
+            except Exception as exc:
+                error = exc
+                result = MavApplicationResult.failure(
+                    "Application handler returned an invalid response",
+                    {"error_type": exc.__class__.__name__},
+                )
         if not self._is_generation_active(generation):
             return
         if error is not None:

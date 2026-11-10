@@ -1,6 +1,8 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+import ipaddress
+import math
+from dataclasses import dataclass, field
 from typing import Any
 
 
@@ -13,6 +15,9 @@ class MavEndpoint:
     dialect: str = "ardupilotmega"
     autoreconnect: bool = True
     heartbeat_timeout: float = 10.0
+    expected_system: int | None = None
+    expected_component: int | None = None
+    signing_key: bytes | None = field(default=None, repr=False)
 
     def __post_init__(self) -> None:
         normalized_uri = self.normalize_uri(self.uri)
@@ -29,14 +34,31 @@ class MavEndpoint:
             raise ValueError("source_system 0..255 aralığında olmalı")
         if not 0 <= self.source_component <= 255:
             raise ValueError("source_component 0..255 aralığında olmalı")
-        if self.heartbeat_timeout <= 0:
-            raise ValueError("Heartbeat timeout pozitif olmalı")
+        for name, value in (
+            ("expected_system", self.expected_system),
+            ("expected_component", self.expected_component),
+        ):
+            if value is not None and (
+                isinstance(value, bool) or not isinstance(value, int) or not 0 <= value <= 255
+            ):
+                raise ValueError(f"{name} 0..255 aralığında bir tamsayı veya None olmalı")
+        if not math.isfinite(self.heartbeat_timeout) or self.heartbeat_timeout <= 0:
+            raise ValueError("Heartbeat timeout pozitif ve sonlu olmalı")
+        if self.signing_key is not None:
+            if not isinstance(self.signing_key, bytes):
+                raise TypeError("MAVLink signing_key bytes olmalı")
+            if len(self.signing_key) != 32:
+                raise ValueError("MAVLink signing_key tam 32 byte olmalı")
         self._validate_network_uri(normalized_uri)
 
     @staticmethod
     def normalize_uri(uri: str) -> str:
         """Treat ``host:port`` as a TCP client address when no scheme is given."""
         normalized = uri.strip()
+        if normalized.startswith("[") and "]:" in normalized:
+            host, separator, port = normalized.rpartition(":")
+            if separator and port.isdigit() and host.endswith("]"):
+                return f"tcp:{host}:{port}"
         if normalized.count(":") != 1:
             return normalized
         host, port = normalized.rsplit(":", 1)
@@ -79,6 +101,20 @@ class MavEndpoint:
             raise ValueError("MAVLink host boş olamaz")
         if not 1 <= normalized_port <= 65535:
             raise ValueError("MAVLink port 1..65535 aralığında olmalı")
+        if normalized_host.startswith("[") and normalized_host.endswith("]"):
+            normalized_host = normalized_host[1:-1]
+        try:
+            address = ipaddress.ip_address(normalized_host)
+        except ValueError:
+            if ":" in normalized_host or any(
+                character.isspace() or character in "/\\[]" for character in normalized_host
+            ):
+                raise ValueError(
+                    "MAVLink host geçersiz; IPv6 adresini köşeli paranteze alın"
+                ) from None
+        else:
+            if address.version == 6:
+                normalized_host = f"[{normalized_host}]"
         return f"{scheme}:{normalized_host}:{normalized_port}"
 
     @staticmethod
@@ -86,9 +122,18 @@ class MavEndpoint:
         scheme = uri.partition(":")[0].lower()
         if scheme not in {"tcp", "tcpin", "udp", "udpin", "udpout"}:
             return
-        try:
-            port = int(uri.rsplit(":", 1)[1])
-        except (IndexError, ValueError) as exc:
-            raise ValueError(f"Geçersiz MAVLink ağ adresi: {uri}") from exc
+        address, separator, port_text = uri[len(scheme) + 1 :].rpartition(":")
+        if not separator or not port_text.isdigit() or not address:
+            raise ValueError(f"Geçersiz MAVLink ağ adresi: {uri}")
+        if address.startswith("[") and address.endswith("]"):
+            try:
+                ipaddress.IPv6Address(address[1:-1])
+            except ValueError as exc:
+                raise ValueError(f"Geçersiz MAVLink IPv6 adresi: {uri}") from exc
+        elif ":" in address or any(
+            character.isspace() or character in "/\\[]" for character in address
+        ):
+            raise ValueError(f"Geçersiz MAVLink ağ adresi: {uri}")
+        port = int(port_text)
         if not 1 <= port <= 65535:
             raise ValueError("MAVLink ağ portu 1..65535 aralığında olmalı; baud ayrı bir ayardır")

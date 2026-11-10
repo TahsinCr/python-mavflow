@@ -230,6 +230,10 @@ class MavRemoteLogBatch:
         values = payload.get("records")
         if not isinstance(values, list):
             raise ValueError("Remote log records must be a list")
+        if len(values) > REMOTE_LOG_MAX_BATCH_RECORDS:
+            raise ValueError(
+                f"Remote log batch cannot contain more than {REMOTE_LOG_MAX_BATCH_RECORDS} records"
+            )
         return cls(
             session_id=str(payload.get("session", "")),
             records=tuple(MavRemoteLogRecord.from_payload(value) for value in values),

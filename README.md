@@ -74,7 +74,8 @@ python -m pip install mavflow
 The distribution and import package are both named `mavflow`. Its required
 dependencies, `flowevent` and `pymavlink`, are installed automatically.
 `flowevent` supplies event buses and subscription handles; Mavflow uses those
-types directly.
+types directly. The current 2.0 development line requires the published
+EventFlow 1.3.2 release (`flowevent>=1.3.2,<1.4`).
 
 For editable development, install the development tools:
 
@@ -111,32 +112,44 @@ from eventflow import AsyncEventQueue
 from mavflow import MavEndpoint, MavRuntime
 
 
-async def main() -> None:
-    runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+async def main(runtime: MavRuntime) -> None:
     async with AsyncEventQueue(
         runtime.messages,
-        routing_key="HEARTBEAT",
         capacity=64,
         overflow="drop_oldest",
     ) as heartbeats:
-        runtime.start()
+
+        async def next_heartbeat():
+            while True:
+                envelope = await heartbeats.receive()
+                if envelope.message_type == "HEARTBEAT":
+                    return envelope
+
         try:
-            envelope = await asyncio.wait_for(heartbeats.receive(), timeout=10.0)
+            envelope = await asyncio.wait_for(next_heartbeat(), timeout=10.0)
         except asyncio.TimeoutError:
             print("No heartbeat received before the timeout")
         else:
             print("First heartbeat:", envelope.message)
-        finally:
-            runtime.stop()
+
+
+runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+try:
+    runtime.start()
+    asyncio.run(main(runtime))
+finally:
     runtime.close()
-
-
-asyncio.run(main())
 ~~~
 
-For synchronous code, call `runtime.messages.wait_for(routing_key="HEARTBEAT")`;
-it returns a `MavMessageEnvelope`, whose `.message` is the original pymavlink
-message. The runtime owns transport start and stop.
+`MavRuntime.start()` is synchronous and may wait for a vehicle heartbeat. This
+example starts the runtime before entering asyncio so connection startup does
+not block the event loop. The runtime's one router thread remains the only
+MAVLink reader; async consumers use the EventFlow queue directly.
+
+For synchronous code, pass an EventFlow `EventFilter` to
+`runtime.messages.wait_for()`. It returns a `MavMessageEnvelope`, whose
+`.message` is the original pymavlink message. The runtime owns transport start
+and stop.
 
 <a id="run-an-example"></a>
 ### Run an example
@@ -212,9 +225,10 @@ the router as the only reader while it is active; subscribe through
 
 `MavMessageRouter` owns the receive loop for a connection. It reads each
 incoming message once, wraps it in `MavMessageEnvelope`, and publishes that
-envelope once through an EventFlow `EventBus`. The bus indexes subscriptions by
-`message_type`, so a keyed subscription skips callbacks for unrelated MAVLink
-types while preserving registration order.
+envelope once through EventFlow's `EventBus`. EventFlow 1.3.2 does not provide
+indexed routing by an envelope field, so message-type selection uses its native
+`EventFilter` predicate. Each predicate runs for each published envelope; Mavflow
+does not maintain a second routing index.
 
 This single-reader ownership keeps transport reads and routing in one place.
 Router callbacks run synchronously during delivery, so keep them short or
@@ -225,9 +239,8 @@ the same message bus directly as `messages` and the native EventFlow engine as
 <a id="filtering"></a>
 ### Filtering and message history
 
-Subscribe with EventFlow routing keys and predicates. A routing key selects a
-message type through the router's indexed bus; `EventFilter` or `predicate`
-handles source IDs and application-specific conditions:
+Use EventFlow's native `EventFilter` predicate to select message types and
+source IDs:
 
 ~~~python
 from eventflow import EventFilter
@@ -235,15 +248,21 @@ from eventflow import EventFilter
 from mavflow import MavEndpoint, MavRuntime
 
 runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
-source_one = EventFilter(predicate=lambda envelope: envelope.source_system == 1)
+position_filter = EventFilter(
+    predicate=lambda envelope: (
+        envelope.message_type == "GLOBAL_POSITION_INT" and envelope.source_system == 1
+    )
+)
 subscription = runtime.messages.subscribe(
     lambda envelope: print(envelope.message),
-    routing_key="GLOBAL_POSITION_INT",
-    event_filter=source_one,
+    event_filter=position_filter,
 )
 runtime.start()
 try:
-    runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+    runtime.messages.wait_for(
+        event_filter=EventFilter(predicate=lambda envelope: envelope.message_type == "HEARTBEAT"),
+        timeout=10.0,
+    )
 finally:
     subscription.cancel()
     runtime.close()
@@ -251,7 +270,10 @@ finally:
 
 The envelope also carries `source_component`, `message_id`, sequence, and
 receive time. A native MAVLink condition can be used inside an EventFlow
-predicate by calling `runtime.connection.evaluate_condition(condition)`.
+predicate by calling `runtime.connection.evaluate_condition(condition)`. This
+delegates to pymavlink's Python expression evaluator; only evaluate trusted
+condition text. Use an ordinary EventFlow predicate for values from an
+untrusted source.
 
 <a id="lifecycle"></a>
 ### Lifecycle and composition
@@ -259,8 +281,9 @@ predicate by calling `runtime.connection.evaluate_condition(condition)`.
 `MavRuntime` composes a client and, when requested, an application channel,
 peer, and dispatcher. `start()` starts the transport and owned application
 services in dependency order. `stop()` shuts them down in reverse order and
-collects shutdown errors. A runtime can be used as a synchronous context
-manager, as in the first example.
+collects shutdown errors. Concurrent `start()`, `stop()`, `reconnect()`, and
+`close()` calls are serialized through the full lifecycle transition. A runtime
+can be used as a synchronous context manager, as in the first example.
 
 Create separate runtimes for separate connections. A runtime can also accept
 an existing `MavClient` when an application needs to share or configure
@@ -272,6 +295,12 @@ the lower-level connection and router.
 Mavflow uses `flowevent` for event buses and subscription handles. Runtime
 message, packet, and error events use that library's contracts directly; Mavflow
 does not implement a second event bus.
+
+EventFlow synchronous subscribers run on the thread that publishes the event.
+For MAVLink messages this is the router's single reader thread, so keep callbacks
+short and non-blocking. Use `AsyncEventQueue` or the application dispatcher for
+work that needs a separate consumer. Do not call blocking `peer.request()` from
+a message callback; the router must continue reading while that request waits.
 
 A subscription returned by `subscribe()` or `handle()` has an explicit
 `cancel()` lifecycle. Cancel subscriptions when their work is complete, or
@@ -288,26 +317,31 @@ manage them with the surrounding service lifetime.
 `MavMessageEnvelope`:
 
 ~~~python
+from eventflow import EventFilter
+
 from mavflow import MavEndpoint, MavRuntime
 
 runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
 subscription = runtime.messages.subscribe(
     lambda envelope: print(envelope.message),
-    routing_key="HEARTBEAT",
+    event_filter=EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT"),
 )
 runtime.start()
 try:
-    first = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+    first = runtime.messages.wait_for(
+        event_filter=EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT"),
+        timeout=10.0,
+    )
     print("First heartbeat:", first.message if first is not None else None)
 finally:
     subscription.cancel()
     runtime.close()
 ~~~
 
-Use `EventFilter` for extra conditions, or the direct `event_type` and
-`predicate` subscription arguments. `routing_key` is indexed by EventFlow
-before the predicate runs, so telemetry subscriptions do not scan unrelated
-message types.
+Use the native `EventFilter` API for message type, source, and other conditions.
+Since all Mavflow messages share the `MavMessageEnvelope` Python type,
+EventFlow 1.3.2 evaluates the predicate for each envelope. Keep filters small
+and benchmark callback fan-out for the expected number of subscribers.
 
 <a id="wait-and-history"></a>
 ### Wait for a message and inspect history
@@ -321,9 +355,12 @@ from eventflow import EventFilter
 from mavflow import MavEndpoint, MavRuntime
 
 with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as runtime:
-    envelope = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
-    history = runtime.messages.history
     heartbeat_filter = EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT")
+    envelope = runtime.messages.wait_for(
+        event_filter=heartbeat_filter,
+        timeout=10.0,
+    )
+    history = runtime.messages.history
     recent = history.query(heartbeat_filter, limit=20) if history is not None else ()
     latest = history.latest(heartbeat_filter) if history is not None else None
     router_state = runtime.state.router
@@ -338,9 +375,10 @@ dispatch errors, estimated dropped messages, and delivery quality.
 ## Async applications
 
 MAVLink transport reads remain owned by the synchronous router. Use EventFlow's
-`AsyncEventQueue` to receive the same envelopes in asyncio. It applies the bus
-filter before consuming bounded queue capacity; `drop_oldest` retains the
-newest telemetry when a consumer falls behind.
+`AsyncEventQueue` to receive the same envelopes in asyncio. EventFlow 1.3.2
+cannot apply a predicate before enqueueing, so all message types share its
+bounded capacity. Filter after `receive()` as shown; unrelated messages can
+also trigger the configured overflow policy.
 
 ~~~python
 import asyncio
@@ -349,26 +387,28 @@ from eventflow import AsyncEventQueue
 from mavflow import MavEndpoint, MavRuntime
 
 
-async def main() -> None:
-    runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+async def main(runtime: MavRuntime) -> None:
     async with AsyncEventQueue(
         runtime.messages,
-        routing_key="HEARTBEAT",
         capacity=64,
         overflow="drop_oldest",
     ) as heartbeats:
-        runtime.start()
-        try:
-            while True:
-                envelope = await heartbeats.receive()
+        while True:
+            envelope = await heartbeats.receive()
+            if envelope.message_type == "HEARTBEAT":
                 print(envelope.message)
-        finally:
-            runtime.stop()
+
+
+runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+try:
+    runtime.start()
+    asyncio.run(main(runtime))
+finally:
     runtime.close()
-
-
-asyncio.run(main())
 ~~~
+
+`MavRuntime.start()` is synchronous; start it before entering asyncio when the
+connection may wait for a heartbeat. The router owns the single MAVLink reader.
 
 The queue owns no MAVLink reader and creates no asyncio task per publication.
 Its `stats()` reports queue depth and dropped events. Cancel the consuming task
@@ -389,7 +429,9 @@ enable it.
 packet ID, timestamp, source IDs, and response flag. `MavApplicationCodec`
 encodes a packet into bounded fragments, adds a checksum, and validates
 fragments during decode. `MavApplicationAssembler` reassembles fragments
-while bounding incomplete packet count, memory, and lifetime.
+while bounding incomplete packet count, memory, and lifetime. It also limits
+incomplete packet count and bytes per MAVLink source so a single sender cannot
+consume the entire shared budget.
 
 The codec can be used without opening a vehicle connection:
 
@@ -454,8 +496,9 @@ Mavflow sends the handler result to the requesting peer. Handler registration
 returns a cancellable subscription.
 
 Use `notify()` for a one-way application packet and `request()` when the caller
-needs a correlated response. Requests carry an ID, accept response type filters,
-and raise `TimeoutError` when no matching response arrives before the deadline:
+needs a correlated response. Requests validate the response's request ID,
+packet type, source system, and source component, and raise `TimeoutError` when
+no matching response arrives before the deadline:
 
 ~~~python
 with MavRuntime(endpoint, application_role="ground-station") as link:
@@ -486,7 +529,7 @@ handler or persist logs locally.
 | Symptom | Checks |
 | --- | --- |
 | `wait_for()` returns `None` or an async receive times out. | Confirm the sender targets the configured UDP/TCP endpoint, the vehicle or simulator is transmitting, and the requested message type is present. Increase the timeout only when the link needs more time to start. |
-| An async receive is waiting or queue capacity is reached. | Check `AsyncEventQueue.stats()` and its configured overflow policy. Route only the message types you need, process events faster, or increase `capacity` if memory permits. |
+| An async receive is waiting or queue capacity is reached. | Check `AsyncEventQueue.stats()` and its configured overflow policy. EventFlow 1.3.2 queues all envelope types, so filter after receiving, process events faster, or increase `capacity` if memory permits. |
 | An application `request()` times out. | Check that the remote peer is running, the packet type and response type match the registered handler, and the selected system/component IDs route to that peer. |
 
 EventFlow `wait_for()` returns `None` when its timeout expires. Async queue
@@ -506,7 +549,52 @@ subscriptions, queue overflow behavior, and bounded worker execution; Mavflow
 keeps only protocol-specific state such as the single reader, packet
 reassembly, request correlation, and MAVLink loss estimates. `runtime.stop()`
 keeps EventFlow channels available for a later restart; `runtime.close()` also
-closes the EventFlow engine.
+closes the EventFlow engine after component cleanup succeeds. If cleanup fails,
+the engine stays open and `close()` can be retried.
+
+`MavConnection.is_connected` means that Mavflow holds a raw pymavlink connection
+object; it is not a link-health signal. Use peer liveness and message timestamps
+for health observations. MAVLink system/component IDs and the application
+protocol's CRC32 checksum do not authenticate a sender. Configure signing and
+allowed source IDs before starting a connection that is exposed to untrusted
+peers:
+
+~~~python
+import os
+
+from mavflow import MavEndpoint, MavRuntime
+
+signing_key = bytes.fromhex(os.environ["MAVLINK_SIGNING_KEY"])
+endpoint = MavEndpoint.udp(
+    "0.0.0.0",
+    14550,
+    expected_system=1,
+    expected_component=1,
+    signing_key=signing_key,
+)
+runtime = MavRuntime(
+    endpoint,
+    application_role="gcs",
+    channel_options={"source_systems": (1,), "source_components": (1,)},
+)
+runtime.start()
+~~~
+
+`signing_key` must be the 32-byte MAVLink 2 secret key. Mavflow configures
+pymavlink signing before waiting for the first heartbeat, signs outgoing frames,
+and leaves unsigned-message acceptance disabled. Optional expected system and
+component IDs filter heartbeat discovery; a runtime uses them as the peer's
+target defaults. `peer_options` can supply an explicit peer target, while
+`channel_options` restricts application packet sources. With no signing key,
+pymavlink's default unsigned behavior remains in effect. A peer target ID of `0`
+is a wildcard; system/component IDs are an allowlist aid, not cryptographic
+identity.
+
+`MavConnection.evaluate_condition()` passes condition text to pymavlink's
+Python expression evaluator. Never pass untrusted text to it. Synchronous
+application handlers cannot be forcibly interrupted by Python, so their I/O and
+loops must have their own finite deadlines; `MavApplicationDispatcher.stop()`
+waits for active handlers to return.
 
 <a id="composition"></a>
 ## Composing the stack
@@ -640,7 +728,10 @@ python -m pyperf compare_to --table benchmarks/results/router.json router-run.js
 
 Use a fresh output filename for each run; pyperf does not overwrite an
 existing result file. The router benchmark measures single-reader delivery
-through a preloaded in-memory connection. The codec benchmark measures
+through a preloaded in-memory connection. Set `--subscribers` to compare
+matching EventFlow callback fan-out (for example, 1, 10, or 100 subscribers).
+This is a router delivery benchmark; the real UDP loopback test is a separate
+correctness check. The codec benchmark measures
 application packet encoding and reassembly. `--fast` is for CI smoke checks;
 use the default calibration for local measurements. Results are specific to
 their recorded interpreter, platform, source fingerprint, and workload. They

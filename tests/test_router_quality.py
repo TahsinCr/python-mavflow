@@ -66,15 +66,56 @@ class RouterQualityTests(unittest.TestCase):
         )
         router.start()
         self.addCleanup(router.stop)
-        for sequence in (254, 255, 0, 1, 4, 200):
+        for sequence in (254, 255, 0, 1, 4, 3, 5, 200):
             connection.inbox.put(_SequencedMessage(sequence))
 
-        self._wait_for(lambda: router.stats.received_messages == 6)
+        self._wait_for(lambda: router.stats.received_messages == 8)
         stats = router.stats
 
-        self.assertEqual(stats.sequence, 6)
+        self.assertEqual(stats.sequence, 8)
         self.assertEqual(stats.estimated_dropped_messages, 2)
         self.assertEqual(stats.delivery_quality, 75)
+
+    def test_envelope_and_quality_errors_do_not_stop_reader(self) -> None:
+        class _InvalidType:
+            def get_type(self) -> str:
+                return ""
+
+        class _InvalidSequence(_SequencedMessage):
+            def get_seq(self) -> int:
+                raise RuntimeError("sequence unavailable")
+
+        connection = _RouterConnection()
+        router = MavMessageRouter(
+            connection,  # type: ignore[arg-type]
+            poll_timeout=0.01,
+            stop_timeout=0.2,
+        )
+        errors: list[Any] = []
+        messages: list[Any] = []
+        router.errors.subscribe(errors.append)
+        router.messages.subscribe(messages.append)
+        router.start()
+        self.addCleanup(router.stop)
+        connection.inbox.put(_InvalidType())
+        connection.inbox.put(_InvalidSequence(1))
+        connection.inbox.put(_SequencedMessage(2))
+
+        self._wait_for(lambda: router.stats.processing_errors == 2)
+
+        self.assertTrue(router.running)
+        self.assertEqual([error.phase for error in errors], ["envelope", "quality"])
+        self.assertEqual(len(messages), 2)
+
+    def test_router_rejects_nonfinite_timeouts(self) -> None:
+        for options in (
+            {"poll_timeout": float("nan")},
+            {"poll_timeout": float("inf")},
+            {"error_backoff": float("nan")},
+            {"stop_timeout": float("inf")},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                MavMessageRouter(_RouterConnection(), **options)  # type: ignore[arg-type]
 
     def test_receive_errors_recover_and_subscriber_errors_are_counted(self) -> None:
         connection = _RouterConnection()
@@ -90,7 +131,10 @@ class RouterQualityTests(unittest.TestCase):
         def failing_subscriber(_envelope: Any) -> None:
             raise RuntimeError("consumer failed")
 
-        router.messages.subscribe(failing_subscriber, routing_key="HEARTBEAT")
+        router.messages.subscribe(
+            failing_subscriber,
+            predicate=lambda envelope: envelope.message_type == "HEARTBEAT",
+        )
         router.start()
         self.addCleanup(router.stop)
         connection.inbox.put(OSError("radio temporarily unavailable"))

@@ -13,7 +13,7 @@ from dataclasses import dataclass, field
 from types import MappingProxyType
 from typing import Any
 
-from eventflow import EventBus, Subscription
+from eventflow import EventBus, EventFilter, Subscription
 
 from .client import MavClient
 from .message import MavMessageEnvelope
@@ -223,13 +223,15 @@ class MavApplicationCodec:
         raw = bytes(payload)
         if len(raw) < _HEADER.size:
             raise MavApplicationProtocolError("Uygulama fragment başlığı eksik")
-        magic, version, _flags, packet_id, index, count, chunk_length, checksum = (
+        magic, version, flags, packet_id, index, count, chunk_length, checksum = (
             _HEADER.unpack_from(raw)
         )
         if magic != _MAGIC:
             raise MavApplicationProtocolError("Uygulama fragment imzası geçersiz")
         if version != _VERSION:
             raise MavApplicationProtocolError(f"Desteklenmeyen uygulama protokol sürümü: {version}")
+        if flags != 0:
+            raise MavApplicationProtocolError("Uygulama fragment ayrılmış flag alanı geçersiz")
         if not 0 < packet_id <= 0xFFFFFFFF:
             raise MavApplicationProtocolError("Uygulama paket kimliği geçersiz")
         if not 1 <= count <= _MAX_FRAGMENT_COUNT or index >= count:
@@ -259,17 +261,35 @@ class MavApplicationCodec:
             )
         except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
             raise MavApplicationProtocolError(f"Uygulama paket gövdesi çözülemedi: {exc}") from exc
-        if not isinstance(decoded, dict) or not isinstance(decoded.get("payload", {}), dict):
+        if not isinstance(decoded, dict):
             raise MavApplicationProtocolError("Uygulama paket gövdesi nesne olmalı")
+        packet_type = decoded.get("type")
+        payload = decoded.get("payload", {})
+        sent_at = decoded.get("sent_at", 0.0)
+        reply = decoded.get("reply", False)
+        if not isinstance(packet_type, str):
+            raise MavApplicationProtocolError("Uygulama paket tipi metin olmalı")
+        if not isinstance(payload, dict):
+            raise MavApplicationProtocolError("Uygulama paket payload değeri nesne olmalı")
+        if isinstance(sent_at, bool) or not isinstance(sent_at, int | float):
+            raise MavApplicationProtocolError("Uygulama paket zamanı sayısal olmalı")
+        try:
+            normalized_sent_at = float(sent_at)
+        except (OverflowError, ValueError) as exc:
+            raise MavApplicationProtocolError("Uygulama paket zamanı geçersiz") from exc
+        if not math.isfinite(normalized_sent_at):
+            raise MavApplicationProtocolError("Uygulama paket zamanı sonlu olmalı")
+        if not isinstance(reply, bool):
+            raise MavApplicationProtocolError("Uygulama reply alanı boolean olmalı")
         try:
             return MavApplicationPacket(
-                str(decoded.get("type", "")),
-                decoded.get("payload", {}),
+                packet_type,
+                payload,
                 packet_id,
-                float(decoded.get("sent_at", 0.0)),
+                normalized_sent_at,
                 source_system,
                 source_component,
-                bool(decoded.get("reply", False)),
+                reply,
             )
         except (TypeError, ValueError, OverflowError) as exc:
             raise MavApplicationProtocolError(f"Uygulama paket gövdesi geçersiz: {exc}") from exc
@@ -284,23 +304,38 @@ class MavApplicationAssembler:
         fragment_timeout: float = 10.0,
         max_inflight_assemblies: int = 256,
         max_inflight_bytes: int = _MAX_PACKET_BYTES * 4,
+        max_inflight_assemblies_per_source: int = 32,
+        max_inflight_bytes_per_source: int | None = None,
         max_completed_packets: int = 1_024,
     ) -> None:
-        if fragment_timeout <= 0:
-            raise ValueError("Fragment zaman aşımı pozitif olmalı")
+        if not math.isfinite(fragment_timeout) or fragment_timeout <= 0:
+            raise ValueError("Fragment zaman aşımı pozitif ve sonlu olmalı")
         if max_inflight_assemblies <= 0:
             raise ValueError("In-flight assembly sınırı pozitif olmalı")
         if max_inflight_bytes <= 0:
             raise ValueError("In-flight byte sınırı pozitif olmalı")
+        if max_inflight_assemblies_per_source <= 0:
+            raise ValueError("Kaynak başına in-flight assembly sınırı pozitif olmalı")
         if max_completed_packets <= 0:
             raise ValueError("Tamamlanan paket geçmişi sınırı pozitif olmalı")
+        source_byte_limit = (
+            min(int(max_inflight_bytes), _MAX_PACKET_BYTES)
+            if max_inflight_bytes_per_source is None
+            else int(max_inflight_bytes_per_source)
+        )
+        if source_byte_limit <= 0:
+            raise ValueError("Kaynak başına in-flight byte sınırı pozitif olmalı")
         self._fragment_timeout = float(fragment_timeout)
         self._max_inflight_assemblies = int(max_inflight_assemblies)
         self._max_inflight_bytes = int(max_inflight_bytes)
+        self._max_inflight_assemblies_per_source = int(max_inflight_assemblies_per_source)
+        self._max_inflight_bytes_per_source = source_byte_limit
         self._max_completed_packets = int(max_completed_packets)
         self._assemblies: dict[tuple[int, int, int], _Assembly] = {}
         self._completed: dict[tuple[int, int, int], float] = {}
         self._inflight_bytes = 0
+        self._source_assembly_counts: dict[tuple[int, int], int] = {}
+        self._source_inflight_bytes: dict[tuple[int, int], int] = {}
         self._next_prune_at = 0.0
         self._lock = threading.RLock()
 
@@ -312,7 +347,8 @@ class MavApplicationAssembler:
         source_component: int | None = None,
     ) -> MavApplicationPacket | None:
         fragment = MavApplicationCodec.decode_fragment(payload)
-        key = (source_system or 0, source_component or 0, fragment.packet_id)
+        source_key = (source_system or 0, source_component or 0)
+        key = (*source_key, fragment.packet_id)
         now = time.monotonic()
         with self._lock:
             self._prune(now)
@@ -322,8 +358,18 @@ class MavApplicationAssembler:
             if assembly is None:
                 if len(self._assemblies) >= self._max_inflight_assemblies:
                     raise MavApplicationProtocolError("Çok fazla tamamlanmamış uygulama paketi var")
+                if (
+                    self._source_assembly_counts.get(source_key, 0)
+                    >= self._max_inflight_assemblies_per_source
+                ):
+                    raise MavApplicationProtocolError(
+                        "Bir MAVLink kaynağı çok fazla tamamlanmamış uygulama paketi açtı"
+                    )
                 assembly = _Assembly(fragment.count, fragment.checksum, now)
                 self._assemblies[key] = assembly
+                self._source_assembly_counts[source_key] = (
+                    self._source_assembly_counts.get(source_key, 0) + 1
+                )
             elif assembly.count != fragment.count or assembly.checksum != fragment.checksum:
                 self._discard_assembly(key)
                 raise MavApplicationProtocolError(
@@ -339,9 +385,20 @@ class MavApplicationAssembler:
                     raise MavApplicationProtocolError(
                         "Tamamlanmamış uygulama paketleri byte sınırını aştı"
                     )
+                if (
+                    self._source_inflight_bytes.get(source_key, 0) + len(fragment.chunk)
+                    > self._max_inflight_bytes_per_source
+                ):
+                    self._discard_assembly(key)
+                    raise MavApplicationProtocolError(
+                        "Bir MAVLink kaynağı in-flight byte sınırını aştı"
+                    )
                 assembly.fragments[fragment.index] = fragment.chunk
                 assembly.byte_count += len(fragment.chunk)
                 self._inflight_bytes += len(fragment.chunk)
+                self._source_inflight_bytes[source_key] = self._source_inflight_bytes.get(
+                    source_key, 0
+                ) + len(fragment.chunk)
             if len(assembly.fragments) != assembly.count:
                 return None
             body = b"".join(assembly.fragments[index] for index in range(assembly.count))
@@ -363,12 +420,25 @@ class MavApplicationAssembler:
             self._assemblies.clear()
             self._completed.clear()
             self._inflight_bytes = 0
+            self._source_assembly_counts.clear()
+            self._source_inflight_bytes.clear()
             self._next_prune_at = 0.0
 
     def _discard_assembly(self, key: tuple[int, int, int]) -> None:
         assembly = self._assemblies.pop(key, None)
         if assembly is not None:
             self._inflight_bytes -= assembly.byte_count
+            source_key = (key[0], key[1])
+            source_count = self._source_assembly_counts[source_key] - 1
+            if source_count:
+                self._source_assembly_counts[source_key] = source_count
+            else:
+                self._source_assembly_counts.pop(source_key)
+            source_bytes = self._source_inflight_bytes.get(source_key, 0) - assembly.byte_count
+            if source_bytes:
+                self._source_inflight_bytes[source_key] = source_bytes
+            else:
+                self._source_inflight_bytes.pop(source_key, None)
 
     def _prune(self, now: float) -> None:
         if now < self._next_prune_at:
@@ -411,6 +481,8 @@ class MavApplicationChannel:
         fragment_timeout: float = 10.0,
         max_inflight_assemblies: int = 256,
         max_inflight_bytes: int = _MAX_PACKET_BYTES * 4,
+        max_inflight_assemblies_per_source: int = 32,
+        max_inflight_bytes_per_source: int | None = None,
         max_completed_packets: int = 1_024,
     ) -> None:
         for name, value, maximum in (
@@ -439,6 +511,8 @@ class MavApplicationChannel:
             fragment_timeout=fragment_timeout,
             max_inflight_assemblies=max_inflight_assemblies,
             max_inflight_bytes=max_inflight_bytes,
+            max_inflight_assemblies_per_source=max_inflight_assemblies_per_source,
+            max_inflight_bytes_per_source=max_inflight_bytes_per_source,
             max_completed_packets=max_completed_packets,
         )
         self._source_systems = _normalize_source_ids(source_systems, "source_systems")
@@ -457,8 +531,7 @@ class MavApplicationChannel:
                 return
             self._subscription = self._client.messages.subscribe(
                 self._on_message,
-                routing_key="V2_EXTENSION",
-                predicate=self._matches_channel,
+                event_filter=EventFilter(predicate=self._matches_channel),
             )
 
     def stop(self) -> None:
@@ -502,6 +575,8 @@ class MavApplicationChannel:
         return packet
 
     def _matches_channel(self, envelope: MavMessageEnvelope) -> bool:
+        if envelope.message_type != "V2_EXTENSION":
+            return False
         message = envelope.message
         try:
             if (
@@ -536,4 +611,5 @@ class MavApplicationChannel:
             self.errors.publish(exc)
             return
         if packet is not None:
-            self.packets.publish(packet)
+            for error in self.packets.publish(packet).errors:
+                self.errors.publish(error)

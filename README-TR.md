@@ -74,6 +74,8 @@ python -m pip install mavflow
 Dağıtımın ve Python import paketinin adı `mavflow`'dur. Zorunlu bağımlılıklar
 olan `flowevent` ve `pymavlink` kurulum sırasında yüklenir. `flowevent` event
 bus ve abonelik handle'larını sağlar; Mavflow bu tipleri doğrudan kullanır.
+Geliştirilmekte olan 2.0 serisi yayımlanmış EventFlow 1.3.2 sürümünü
+(`flowevent>=1.3.2,<1.4`) ister.
 
 Düzenlenebilir geliştirme kurulumu ve araçları için:
 
@@ -111,32 +113,43 @@ from eventflow import AsyncEventQueue
 from mavflow import MavEndpoint, MavRuntime
 
 
-async def main() -> None:
-    runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+async def main(runtime: MavRuntime) -> None:
     async with AsyncEventQueue(
         runtime.messages,
-        routing_key="HEARTBEAT",
         capacity=64,
         overflow="drop_oldest",
     ) as heartbeats:
-        runtime.start()
+
+        async def next_heartbeat():
+            while True:
+                envelope = await heartbeats.receive()
+                if envelope.message_type == "HEARTBEAT":
+                    return envelope
+
         try:
-            envelope = await asyncio.wait_for(heartbeats.receive(), timeout=10.0)
+            envelope = await asyncio.wait_for(next_heartbeat(), timeout=10.0)
         except asyncio.TimeoutError:
             print("Süre dolmadan heartbeat alınamadı")
         else:
             print("İlk heartbeat:", envelope.message)
-        finally:
-            runtime.stop()
+
+
+runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+try:
+    runtime.start()
+    asyncio.run(main(runtime))
+finally:
     runtime.close()
-
-
-asyncio.run(main())
 ~~~
 
-Senkron kodda `runtime.messages.wait_for(routing_key="HEARTBEAT")` kullanın;
-sonuç bir `MavMessageEnvelope`, asıl pymavlink mesajı ise `.message` alanıdır.
-Transport yaşam döngüsünü runtime yönetir.
+`MavRuntime.start()` senkrondur ve heartbeat bekleyebilir. Bu örnek bağlantı
+başlatmasını asyncio döngüsüne girmeden yaparak event loop'un bloklanmasını
+önler. Runtime'ın tek router thread'i MAVLink reader olarak kalır; async
+tüketiciler doğrudan EventFlow kuyruğunu kullanır.
+
+Senkron kodda `runtime.messages.wait_for()` metoduna EventFlow
+`EventFilter` verin. Sonuç bir `MavMessageEnvelope` olur; asıl pymavlink mesajı
+`.message` alanındadır. Transport yaşam döngüsünü runtime yönetir.
 
 <a id="run-an-example"></a>
 ### Bir örneği çalıştırma
@@ -212,9 +225,10 @@ için `runtime.messages` kanalını kullanın.
 
 `MavMessageRouter` bağlantının okuma döngüsünü sahiplenir. Gelen mesajı bir
 kez okur, `MavMessageEnvelope` içine alır ve EventFlow `EventBus` üzerinden bir
-kez yayımlar. Bus abonelikleri `message_type` anahtarına göre indeksler;
-anahtarlı abonelik ilgisiz MAVLink tiplerinin callback'lerini atlar ve kayıt
-sırasını korur.
+kez yayımlar. EventFlow 1.3.2 envelope alanına göre indeksli yönlendirme
+sağlamaz; mesaj tipi seçimi native `EventFilter` predicate'iyle yapılır. Her
+predicate her yayınlanan envelope için çalışır; Mavflow ikinci bir yönlendirme
+indeksi tutmaz.
 
 Tek okuyucu sahipliği transport okumasını ve yönlendirmeyi tek yerde tutar.
 Router callback'leri senkron teslimat sırasında çalışır; kısa tutun veya pahalı
@@ -224,9 +238,8 @@ EventFlow bus'ını `messages`, engine'i `events` olarak doğrudan sunar.
 <a id="filtering"></a>
 ### Filtreleme ve mesaj geçmişi
 
-EventFlow routing key ve predicate kullanarak abone olun. Routing key router'ın
-indeksli bus'ında bir mesaj tipini seçer; ek kaynak kimlikleri ve uygulama
-koşulları için `EventFilter` kullanın:
+Mesaj tipini ve kaynak kimliklerini EventFlow'un native `EventFilter`
+predicate'iyle seçin:
 
 ~~~python
 from eventflow import EventFilter
@@ -234,15 +247,21 @@ from eventflow import EventFilter
 from mavflow import MavEndpoint, MavRuntime
 
 runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
-source_one = EventFilter(predicate=lambda envelope: envelope.source_system == 1)
+position_filter = EventFilter(
+    predicate=lambda envelope: (
+        envelope.message_type == "GLOBAL_POSITION_INT" and envelope.source_system == 1
+    )
+)
 subscription = runtime.messages.subscribe(
     lambda envelope: print(envelope.message),
-    routing_key="GLOBAL_POSITION_INT",
-    event_filter=source_one,
+    event_filter=position_filter,
 )
 runtime.start()
 try:
-    runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+    runtime.messages.wait_for(
+        event_filter=EventFilter(predicate=lambda envelope: envelope.message_type == "HEARTBEAT"),
+        timeout=10.0,
+    )
 finally:
     subscription.cancel()
     runtime.close()
@@ -250,7 +269,10 @@ finally:
 
 Envelope; `source_component`, `message_id`, sequence ve alım zamanını da taşır.
 Native MAVLink condition koşulunu `runtime.connection.evaluate_condition(condition)`
-çağıran bir EventFlow predicate'i içinde değerlendirebilirsiniz.
+çağıran bir EventFlow predicate'i içinde değerlendirebilirsiniz. Bu çağrı
+pymavlink'in Python ifade değerlendiricisini kullanır; yalnızca güvenilir
+condition metinlerini verin. Güvenilmeyen değerler için normal bir EventFlow
+predicate'i kullanın.
 
 <a id="lifecycle"></a>
 ### Yaşam döngüsü ve bileşim
@@ -258,8 +280,9 @@ Native MAVLink condition koşulunu `runtime.connection.evaluate_condition(condit
 `MavRuntime` bir client'ı ve istendiğinde uygulama channel'ını, peer'i ve
 dispatcher'ı bir araya getirir. `start()` transportu ve sahip olunan uygulama
 servislerini bağımlılık sırasına göre başlatır. `stop()` ters sırayla kapatır
-ve kapatma hatalarını toplar. İlk örnekteki gibi senkron context manager olarak
-da kullanılabilir.
+ve kapatma hatalarını toplar. Eşzamanlı `start()`, `stop()`, `reconnect()` ve
+`close()` çağrıları tam yaşam döngüsü geçişi boyunca sıraya alınır. Senkron
+context manager olarak da kullanılabilir.
 
 Ayrı bağlantılar için ayrı runtime'lar oluşturun. Daha alt seviyeli connection
 ve router'ı paylaşması veya yapılandırması gereken uygulamalar mevcut bir
@@ -271,6 +294,13 @@ ve router'ı paylaşması veya yapılandırması gereken uygulamalar mevcut bir
 Mavflow event bus ve abonelik handle'ları için `flowevent` kullanır. Runtime
 mesaj, paket ve hata event'leri bu kütüphanenin sözleşmelerini doğrudan
 kullanır; Mavflow ikinci bir event bus uygulamaz.
+
+EventFlow senkron aboneleri event'i yayınlayan thread üzerinde çalıştırır.
+MAVLink mesajlarında bu, router'ın tek reader thread'idir; callback'leri kısa
+ve bloklamayan şekilde tutun. Ayrı tüketici gerektiren işler için
+`AsyncEventQueue` veya uygulama dispatcher'ını kullanın. Bekleyen bir
+`peer.request()` çağrısını mesaj callback'i içinden yapmayın; yanıtı almak için
+router'ın okumaya devam etmesi gerekir.
 
 `subscribe()` veya `handle()` tarafından döndürülen abonelikler açık bir
 `cancel()` yaşam döngüsüne sahiptir. İş tamamlandığında aboneliği iptal edin
@@ -287,25 +317,31 @@ veya onu ilgili servis yaşam döngüsüyle yönetin.
 `MavMessageEnvelope` verilir:
 
 ~~~python
+from eventflow import EventFilter
+
 from mavflow import MavEndpoint, MavRuntime
 
 runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
 subscription = runtime.messages.subscribe(
     lambda envelope: print(envelope.message),
-    routing_key="HEARTBEAT",
+    event_filter=EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT"),
 )
 runtime.start()
 try:
-    first = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
+    first = runtime.messages.wait_for(
+        event_filter=EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT"),
+        timeout=10.0,
+    )
     print("İlk heartbeat:", first.message if first is not None else None)
 finally:
     subscription.cancel()
     runtime.close()
 ~~~
 
-Ek koşullar için `EventFilter` veya `event_type` ve `predicate` abonelik
-argümanlarını kullanın. `routing_key` EventFlow tarafından indeks üzerinde
-uygulanır; telemetri aboneliği ilgisiz mesaj tiplerini taramaz.
+Mesaj tipi, kaynak ve diğer koşullar için native `EventFilter` API'sini kullanın.
+Mavflow mesajlarının hepsi aynı `MavMessageEnvelope` Python tipini kullandığı
+için EventFlow 1.3.2 her envelope için predicate'i değerlendirir. Filtreleri
+küçük tutun ve beklenen abone sayısında callback fan-out ölçümü yapın.
 
 <a id="wait-and-history"></a>
 ### Mesaj bekleme ve geçmişi inceleme
@@ -319,9 +355,12 @@ from eventflow import EventFilter
 from mavflow import MavEndpoint, MavRuntime
 
 with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as runtime:
-    envelope = runtime.messages.wait_for(routing_key="HEARTBEAT", timeout=10.0)
-    history = runtime.messages.history
     heartbeat_filter = EventFilter(predicate=lambda item: item.message_type == "HEARTBEAT")
+    envelope = runtime.messages.wait_for(
+        event_filter=heartbeat_filter,
+        timeout=10.0,
+    )
+    history = runtime.messages.history
     recent = history.query(heartbeat_filter, limit=20) if history is not None else ()
     latest = history.latest(heartbeat_filter) if history is not None else None
     router_state = runtime.state.router
@@ -337,8 +376,9 @@ ve teslimat kalitesini içerir.
 
 MAVLink transport okuması senkron router'ın sahipliğinde kalır. Aynı
 envelope'ları asyncio içinde almak için EventFlow `AsyncEventQueue` kullanın.
-Filtre kuyruğun kapasitesini tüketmeden uygulanır; tüketici yavaşladığında
-`drop_oldest` en yeni telemetriyi korur.
+EventFlow 1.3.2 kuyruğa eklemeden önce predicate uygulayamadığından tüm mesaj
+tipleri sınırlı kapasiteyi paylaşır. Örnekteki gibi `receive()` sonrasında
+filtreleyin; ilgisiz mesajlar da taşma politikasını tetikleyebilir.
 
 ~~~python
 import asyncio
@@ -347,26 +387,28 @@ from eventflow import AsyncEventQueue
 from mavflow import MavEndpoint, MavRuntime
 
 
-async def main() -> None:
-    runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+async def main(runtime: MavRuntime) -> None:
     async with AsyncEventQueue(
         runtime.messages,
-        routing_key="HEARTBEAT",
         capacity=64,
         overflow="drop_oldest",
     ) as heartbeats:
-        runtime.start()
-        try:
-            while True:
-                envelope = await heartbeats.receive()
+        while True:
+            envelope = await heartbeats.receive()
+            if envelope.message_type == "HEARTBEAT":
                 print(envelope.message)
-        finally:
-            runtime.stop()
+
+
+runtime = MavRuntime(MavEndpoint.udp("0.0.0.0", 14550))
+try:
+    runtime.start()
+    asyncio.run(main(runtime))
+finally:
     runtime.close()
-
-
-asyncio.run(main())
 ~~~
+
+Bağlantı heartbeat bekleyebilecekse senkron `MavRuntime.start()` çağrısını
+asyncio'ya girmeden yapın. Tek MAVLink reader router tarafından yönetilir.
 
 Kuyruk MAVLink reader'ı sahiplenmez ve her yayın için asyncio task'ı oluşturmaz.
 `stats()` kuyruk derinliğini ve düşen event sayısını verir. Tüketici task'ını
@@ -388,7 +430,8 @@ zaman damgası, kaynak kimlikleri ve yanıt bayrağını taşır.
 `MavApplicationCodec` paketi sınırlandırılmış parçalara böler, checksum
 ekler ve decode sırasında parçaları doğrular. `MavApplicationAssembler`
 eksik paketlerin sayısını, belleğini ve yaşam süresini sınırlandırarak
-parçaları birleştirir.
+parçaları birleştirir. Ayrıca tek MAVLink kaynağının paylaşılan bütçenin tümünü
+tüketmemesi için kaynak başına eksik paket ve byte sınırı uygular.
 
 Codec araç bağlantısı açılmadan da kullanılabilir:
 
@@ -453,8 +496,8 @@ Mavflow handler sonucunu isteği gönderen peer'a iletir. Handler kaydı iptal
 edilebilir bir abonelik döndürür.
 
 Tek yönlü paket için `notify()`, ilişkili bir yanıt beklendiğinde `request()`
-kullanın. İstek bir ID taşır, yanıt tipi filtresi kabul eder ve süre dolmadan
-eşleşen yanıt gelmezse `TimeoutError` yükseltir:
+kullanın. Yanıtın istek ID'si, paket tipi, kaynak system'i ve component'i
+doğrulanır. Süre dolmadan eşleşen yanıt gelmezse `TimeoutError` yükselir:
 
 ~~~python
 with MavRuntime(endpoint, application_role="ground-station") as link:
@@ -485,7 +528,7 @@ logları yerel depolamaya yazmaz.
 | Belirti | Kontroller |
 | --- | --- |
 | `wait_for()` `None` döndürüyor veya async receive süre aşımına uğruyor. | Göndericinin yapılandırılmış UDP/TCP endpoint'e veri gönderdiğini, araç veya simülatörün yayın yaptığını ve istenen mesaj tipinin mevcut olduğunu doğrulayın. Bağlantının açılması daha uzun sürüyorsa timeout'u artırın. |
-| Async receive bekliyor veya kuyruk kapasitesi doluyor. | `AsyncEventQueue.stats()` ve yapılandırılan taşma politikasını kontrol edin. Yalnızca gereken mesaj tiplerini yönlendirin, olayları daha hızlı işleyin veya bellek uygunsa `capacity` değerini artırın. |
+| Async receive bekliyor veya kuyruk kapasitesi doluyor. | `AsyncEventQueue.stats()` ve yapılandırılan taşma politikasını kontrol edin. EventFlow 1.3.2 tüm envelope tiplerini kuyruğa alır; alımdan sonra filtreleyin, olayları daha hızlı işleyin veya bellek uygunsa `capacity` değerini artırın. |
 | Uygulama `request()` çağrısı süre aşımına uğruyor. | Uzak peer'ın çalıştığını, paket tipiyle yanıt tipinin kayıtlı handler ile eşleştiğini ve system/component ID'lerinin bu peer'a yönlendirdiğini kontrol edin. |
 
 EventFlow `wait_for()` bekleme süresi dolunca `None` döndürür. Async queue
@@ -504,7 +547,53 @@ handler işleri bellekte sınırlıdır. EventFlow mesaj geçmişini, abonelikle
 queue taşma davranışını ve sınırlı worker yürütmesini yönetir. Mavflow yalnızca
 tek reader, paket birleştirme, istek korelasyonu ve MAVLink kayıp tahmini gibi
 protokole özel durumu tutar. `runtime.stop()` EventFlow kanallarını yeniden
-başlatma için açık bırakır; `runtime.close()` EventFlow engine'ini de kapatır.
+başlatma için açık bırakır; `runtime.close()` bileşen temizliği başarıyla
+tamamlandığında EventFlow engine'ini de kapatır. Temizlik başarısız olursa
+engine açık kalır ve `close()` yeniden denenebilir.
+
+`MavConnection.is_connected`, Mavflow'un bir pymavlink bağlantı nesnesi
+tuttuğunu belirtir; bağlantının sağlıklı olduğunu göstermez. Sağlık gözlemi için
+peer canlılığı ve mesaj zamanlarını kullanın. MAVLink system/component ID'leri
+ve uygulama protokolünün CRC32 checksum'ı göndericiyi doğrulamaz. Güvenilmeyen
+bağlantılarda imzalama ve izin verilen kaynak ID'lerini bağlantıyı başlatmadan
+önce yapılandırın:
+
+~~~python
+import os
+
+from mavflow import MavEndpoint, MavRuntime
+
+signing_key = bytes.fromhex(os.environ["MAVLINK_SIGNING_KEY"])
+endpoint = MavEndpoint.udp(
+    "0.0.0.0",
+    14550,
+    expected_system=1,
+    expected_component=1,
+    signing_key=signing_key,
+)
+runtime = MavRuntime(
+    endpoint,
+    application_role="gcs",
+    channel_options={"source_systems": (1,), "source_components": (1,)},
+)
+runtime.start()
+~~~
+
+`signing_key`, 32 byte'lık MAVLink 2 gizli anahtarı olmalıdır. Mavflow, ilk
+heartbeat beklenmeden önce pymavlink imzalamasını kurar, giden frame'leri
+imzalar ve imzasız mesaj kabulünü kapalı tutar. İsteğe bağlı beklenen system ve
+component ID'leri heartbeat keşfini filtreler; runtime bunları peer hedefinin
+varsayılanı olarak kullanır. `peer_options` peer hedefini açıkça belirleyebilir,
+`channel_options` uygulama paketlerinin kaynak ID'lerini sınırlar. Anahtar
+verilmezse pymavlink'in varsayılan imzasız davranışı geçerli olur. Peer hedefindeki
+`0`, wildcard anlamına gelir; system/component ID'leri kriptografik kimlik
+değildir.
+
+`MavConnection.evaluate_condition()` condition metnini pymavlink'in Python
+ifade değerlendiricisine verir. Bu metoda güvenilmeyen metin göndermeyin.
+Çalışan senkron handler'lar Python tarafından zorla kesilemez; I/O ve döngüler
+kendi sonlu zaman sınırlarına sahip olmalıdır. `MavApplicationDispatcher.stop()`
+çalışan handler'ların dönmesini bekler.
 
 <a id="composition"></a>
 ## Yığını birleştirme
@@ -640,7 +729,10 @@ python -m pyperf compare_to --table benchmarks/results/router.json router-run.js
 
 Her çalıştırma için kullanılmamış bir çıktı dosyası seçin; pyperf mevcut
 dosyanın üzerine yazmaz. Router benchmark'ı önceden doldurulmuş bellek içi
-connection üzerinden tek okuyuculu teslimatı ölçer. Codec benchmark'ı
+connection üzerinden tek okuyuculu teslimatı ölçer. Eşleşen EventFlow callback
+fan-out sayısını karşılaştırmak için `--subscribers` değerini değiştirin
+(ör. 1, 10 veya 100). Bu router teslimat benchmark'ıdır; gerçek UDP loopback
+testi ayrı bir doğruluk kontrolüdür. Codec benchmark'ı
 uygulama paketi kodlama ve birleştirmeyi ölçer. `--fast` yalnız CI smoke
 kontrolleri içindir; yerel ölçümlerde varsayılan kalibrasyonu kullanın.
 Sonuçlar kaydedilen yorumlayıcıya, platforma, kaynak fingerprint'ine ve iş

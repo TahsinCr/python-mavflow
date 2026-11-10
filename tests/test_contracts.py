@@ -2,9 +2,12 @@ from __future__ import annotations
 
 import math
 import queue
+import sys
 import threading
 import unittest
+from types import ModuleType, SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from eventflow import EventFilter
 
@@ -26,17 +29,42 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(MavEndpoint("127.0.0.1:5760").uri, "tcp:127.0.0.1:5760")
         self.assertEqual(MavEndpoint.tcp("localhost", 5760).uri, "tcp:localhost:5760")
         self.assertEqual(MavEndpoint.udp("0.0.0.0", 14550).uri, "udp:0.0.0.0:14550")
+        self.assertEqual(MavEndpoint.udp("::1", 14550).uri, "udp:[::1]:14550")
+        self.assertEqual(MavEndpoint("[::1]:14550").uri, "tcp:[::1]:14550")
         serial = MavEndpoint.serial(" /dev/ttyUSB0 ", baud=57600)
         self.assertEqual((serial.uri, serial.baud), ("/dev/ttyUSB0", 57600))
 
     def test_endpoint_rejects_invalid_values(self) -> None:
-        for uri in ("udp:127.0.0.1:0", "tcp:localhost:65536", "udp:host:not-a-port"):
+        for uri in (
+            "udp:127.0.0.1:0",
+            "tcp:localhost:65536",
+            "udp:host:not-a-port",
+            "tcp::14550",
+            "udp:[not-ip]:14550",
+            "tcp:2001:db8::1:14550",
+        ):
             with self.subTest(uri=uri), self.assertRaises(ValueError):
                 MavEndpoint(uri)
         with self.assertRaises(ValueError):
             MavEndpoint(source_system=256)
+        for field, value in (("expected_system", 256), ("expected_component", -1)):
+            with self.subTest(field=field), self.assertRaises(ValueError):
+                MavEndpoint(**{field: value})
         with self.assertRaises(ValueError):
             MavEndpoint(heartbeat_timeout=0)
+        for timeout in (math.nan, math.inf, -math.inf):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                MavEndpoint(heartbeat_timeout=timeout)
+        for key in ("x" * 32, b"short"):
+            with self.subTest(key_type=type(key)), self.assertRaises((TypeError, ValueError)):
+                MavEndpoint(signing_key=key)  # type: ignore[arg-type]
+
+    def test_signing_key_is_validated_and_hidden_from_endpoint_repr(self) -> None:
+        secret = b"s" * 32
+        endpoint = MavEndpoint(signing_key=secret)
+
+        self.assertNotIn(secret.decode(), repr(endpoint))
+        self.assertEqual(endpoint.signing_key, secret)
 
 
 class _Header:
@@ -101,8 +129,21 @@ class _RawConnection:
         self.target_component = 1
         self.messages = {"HEARTBEAT": object()}
         self.recv_kwargs: dict[str, Any] | None = None
+        self.operations: list[str] = []
+        self.signing_calls: list[tuple[bytes, bool, object]] = []
+
+    def setup_signing(
+        self,
+        secret_key: bytes,
+        *,
+        sign_outgoing: bool = True,
+        allow_unsigned_callback: object = None,
+    ) -> None:
+        self.operations.append("signing")
+        self.signing_calls.append((secret_key, sign_outgoing, allow_unsigned_callback))
 
     def wait_heartbeat(self, *, timeout: float) -> Any:
+        self.operations.append("heartbeat")
         del timeout
         return self.heartbeats.pop(0) if self.heartbeats else None
 
@@ -136,6 +177,60 @@ class _MavutilStub:
 
 
 class ConnectionTests(unittest.TestCase):
+    def test_start_waits_for_configured_peer_system_and_component(self) -> None:
+        class Heartbeat:
+            def __init__(self, system: int, component: int) -> None:
+                self.system = system
+                self.component = component
+
+            def get_srcSystem(self) -> int:
+                return self.system
+
+            def get_srcComponent(self) -> int:
+                return self.component
+
+        class VehicleConnection(_RawConnection):
+            def probably_vehicle_heartbeat(self, _heartbeat: Any) -> bool:
+                return True
+
+        raw = VehicleConnection([Heartbeat(2, 1), Heartbeat(7, 3), Heartbeat(7, 1)])
+        connection = MavConnection(
+            MavEndpoint(expected_system=7, expected_component=1),
+            connection_factory=lambda _endpoint: raw,
+        )
+
+        connection.start()
+
+        self.assertEqual(raw.operations.count("heartbeat"), 3)
+        connection.stop()
+
+    def test_signing_is_set_before_the_first_heartbeat(self) -> None:
+        secret = b"s" * 32
+        raw = _RawConnection(["vehicle"])
+        connection = MavConnection(
+            MavEndpoint(signing_key=secret),
+            connection_factory=lambda _endpoint: raw,
+        )
+
+        connection.start()
+
+        self.assertEqual(raw.operations, ["signing", "heartbeat"])
+        self.assertEqual(raw.signing_calls, [(secret, True, None)])
+        connection.stop()
+
+    def test_configured_signing_fails_closed_without_pymavlink_support(self) -> None:
+        closed: list[bool] = []
+        raw = SimpleNamespace(close=lambda: closed.append(True))
+        connection = MavConnection(
+            MavEndpoint(signing_key=b"s" * 32),
+            connection_factory=lambda _endpoint: raw,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "setup_signing"):
+            connection.start()
+
+        self.assertEqual(closed, [True])
+
     def test_connection_lifecycle_filters_nonvehicle_heartbeat_and_serializes_calls(self) -> None:
         raw = _RawConnection(["companion", "vehicle"])
         connection = MavConnection(
@@ -151,6 +246,9 @@ class ConnectionTests(unittest.TestCase):
         self.assertTrue(connection.is_connected)
         self.assertEqual(connection.target_system, 7)
         self.assertTrue(connection.evaluate_condition("HEARTBEAT"))
+        for timeout in (math.nan, math.inf, -1.0):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                connection.receive(timeout=timeout)
         self.assertEqual(
             connection.receive(
                 message_types=["HEARTBEAT", "GLOBAL_POSITION_INT"],
@@ -210,6 +308,17 @@ class ConnectionTests(unittest.TestCase):
         self.assertIsInstance(errors[-1], ValueError)
         connection.stop()
 
+    def test_mavlink_property_uses_the_active_connection_dialect(self) -> None:
+        dialect_name = "tests._mavflow_test_dialect"
+        dialect = ModuleType(dialect_name)
+        encoder_type = type("MAVLink", (), {"__module__": dialect_name})
+        dialect.MAVLink = encoder_type  # type: ignore[attr-defined]
+        connection = MavConnection(MavEndpoint(), mavutil_module=_MavutilStub())
+        connection._connection = SimpleNamespace(mav=encoder_type())
+
+        with patch.dict(sys.modules, {dialect_name: dialect}):
+            self.assertIs(connection.mavlink, dialect)
+
 
 class _RouterConnection:
     def __init__(self) -> None:
@@ -234,7 +343,7 @@ class _RouterConnection:
 
 
 class RouterContractTests(unittest.TestCase):
-    def test_router_publishes_keyed_envelopes_with_eventflow_history(self) -> None:
+    def test_router_publishes_envelopes_with_eventflow_filterable_history(self) -> None:
         connection = _RouterConnection()
         router = MavMessageRouter(
             connection,  # type: ignore[arg-type]
@@ -244,8 +353,11 @@ class RouterContractTests(unittest.TestCase):
         received: list[MavMessageEnvelope] = []
         router.messages.subscribe(
             received.append,
-            routing_key="HEARTBEAT",
-            predicate=lambda envelope: envelope.source_system == 3,
+            event_filter=EventFilter(
+                predicate=lambda envelope: (
+                    envelope.message_type == "HEARTBEAT" and envelope.source_system == 3
+                )
+            ),
         )
         router.start()
         connection.inbox.put(
@@ -264,7 +376,10 @@ class RouterContractTests(unittest.TestCase):
             ),
         )
         waiter.start()
-        matched = router.messages.wait_for(routing_key="ATTITUDE", timeout=1.0)
+        matched = router.messages.wait_for(
+            event_filter=EventFilter(predicate=lambda item: item.message_type == "ATTITUDE"),
+            timeout=1.0,
+        )
         waiter.join(timeout=1.0)
         history = router.messages.history
         self.assertIsNotNone(history)
@@ -279,7 +394,12 @@ class RouterContractTests(unittest.TestCase):
         self.assertIsNotNone(latest)
         self.assertEqual(latest.message.value, 2)
         self.assertEqual(len(history.query(heartbeat_filter)), 2)
-        self.assertIsNone(router.messages.wait_for(routing_key="UNKNOWN", timeout=0.02))
+        self.assertIsNone(
+            router.messages.wait_for(
+                event_filter=EventFilter(predicate=lambda item: item.message_type == "UNKNOWN"),
+                timeout=0.02,
+            )
+        )
         self.assertFalse(waiter.is_alive())
         router.stop()
 
@@ -350,6 +470,15 @@ class RemoteLogTests(unittest.TestCase):
             MavRemoteLogBatch.from_payload(
                 {"version": 1, "session": "session-001", "records": "bad"}
             )
+        with patch.object(MavRemoteLogRecord, "from_payload", side_effect=AssertionError):
+            with self.assertRaisesRegex(ValueError, "cannot contain more than"):
+                MavRemoteLogBatch.from_payload(
+                    {
+                        "version": 1,
+                        "session": "session-001",
+                        "records": [{}] * (REMOTE_LOG_MAX_BATCH_RECORDS + 1),
+                    }
+                )
 
     def test_remote_log_batch_enforces_count_timestamp_and_encoded_size_limits(self) -> None:
         with self.assertRaisesRegex(ValueError, "1.."):

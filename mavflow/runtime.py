@@ -65,14 +65,21 @@ class MavRuntime:
                 self.client,
                 **dict(channel_options or {}),
             )
-            peer = MavApplicationPeer(
-                channel,
-                role=role,
-                target_system=lambda: self.connection.target_system,
-                target_component=lambda: self.connection.target_component,
-                transport_available=lambda: self.client.is_connected,
-                **dict(peer_options or {}),
+            peer_config = dict(peer_options or {})
+            peer_config.setdefault(
+                "target_system",
+                self.client.endpoint.expected_system
+                if self.client.endpoint.expected_system is not None
+                else lambda: self.connection.target_system,
             )
+            peer_config.setdefault(
+                "target_component",
+                self.client.endpoint.expected_component
+                if self.client.endpoint.expected_component is not None
+                else lambda: self.connection.target_component,
+            )
+            peer_config.setdefault("transport_available", lambda: self.client.is_connected)
+            peer = MavApplicationPeer(channel, role=role, **peer_config)
         self.channel = channel
         self.peer = peer
         self.dispatcher = dispatcher or (
@@ -102,6 +109,7 @@ class MavRuntime:
         self._cleanup_pending = False
         self._closed = False
         self._lock = threading.RLock()
+        self._lifecycle_lock = threading.RLock()
 
     @property
     def running(self) -> bool:
@@ -137,90 +145,85 @@ class MavRuntime:
     def start(self) -> None:
         """Start transport, application peer, and dispatcher in safe order."""
 
-        with self._lock:
-            if self._closed:
-                raise RuntimeError("MAVLink runtime is closed")
-            if self._cleanup_pending:
-                raise RuntimeError("MAVLink runtime cleanup must complete before restart")
-            if self._running:
-                return
-        started_stops: list[Callable[[], None]] = []
-        try:
-            self.client.start()
-            started_stops.append(self.client.stop)
-            if self.peer is not None:
-                self.peer.start()
-                started_stops.append(self.peer.stop)
-            elif self.channel is not None:
-                self.channel.start()
-                started_stops.append(self.channel.stop)
-            if self.dispatcher is not None:
-                self.dispatcher.start()
-                started_stops.append(self.dispatcher.stop)
-        except Exception:
-            cleanup_failed = False
-            for stop_component in reversed(started_stops):
-                try:
-                    stop_component()
-                except Exception:
-                    cleanup_failed = True
+        with self._lifecycle_lock:
             with self._lock:
-                self._cleanup_pending = cleanup_failed
-            raise
-        with self._lock:
-            self._running = True
+                if self._closed:
+                    raise RuntimeError("MAVLink runtime is closed")
+                if self._cleanup_pending:
+                    raise RuntimeError("MAVLink runtime cleanup must complete before restart")
+                if self._running:
+                    return
+            started_stops: list[Callable[[], None]] = []
+            try:
+                self.client.start()
+                started_stops.append(self.client.stop)
+                if self.peer is not None:
+                    self.peer.start()
+                    started_stops.append(self.peer.stop)
+                elif self.channel is not None:
+                    self.channel.start()
+                    started_stops.append(self.channel.stop)
+                if self.dispatcher is not None:
+                    self.dispatcher.start()
+                    started_stops.append(self.dispatcher.stop)
+            except Exception:
+                cleanup_failed = False
+                for stop_component in reversed(started_stops):
+                    try:
+                        stop_component()
+                    except Exception:
+                        cleanup_failed = True
+                with self._lock:
+                    self._cleanup_pending = cleanup_failed
+                raise
+            with self._lock:
+                self._running = True
 
     def stop(self) -> None:
         """Stop every owned layer in reverse order and preserve all errors."""
 
-        with self._lock:
-            if not self._running and not self._cleanup_pending:
-                return
-            self._running = False
-            self._cleanup_pending = True
-        stop_callbacks: list[Callable[[], None]] = []
-        if self.dispatcher is not None:
-            stop_callbacks.append(self.dispatcher.stop)
-        if self.peer is not None:
-            stop_callbacks.append(self.peer.stop)
-        elif self.channel is not None:
-            stop_callbacks.append(self.channel.stop)
-        stop_callbacks.append(self.client.stop)
+        with self._lifecycle_lock:
+            with self._lock:
+                if not self._running and not self._cleanup_pending:
+                    return
+                self._running = False
+                self._cleanup_pending = True
+            stop_callbacks: list[Callable[[], None]] = []
+            if self.dispatcher is not None:
+                stop_callbacks.append(self.dispatcher.stop)
+            if self.peer is not None:
+                stop_callbacks.append(self.peer.stop)
+            elif self.channel is not None:
+                stop_callbacks.append(self.channel.stop)
+            stop_callbacks.append(self.client.stop)
 
-        errors: list[Exception] = []
-        for stop_component in stop_callbacks:
-            try:
-                stop_component()
-            except Exception as exc:
-                errors.append(exc)
-        if errors:
-            raise ExceptionGroup("MAVLink runtime shutdown failed", errors)
-        with self._lock:
-            self._cleanup_pending = False
+            errors: list[Exception] = []
+            for stop_component in stop_callbacks:
+                try:
+                    stop_component()
+                except Exception as exc:
+                    errors.append(exc)
+            if errors:
+                raise ExceptionGroup("MAVLink runtime shutdown failed", errors)
+            with self._lock:
+                self._cleanup_pending = False
 
     def close(self) -> None:
         """Stop owned services and close the EventFlow channel engine."""
 
-        with self._lock:
-            if self._closed:
-                return
-        errors: list[Exception] = []
-        try:
+        with self._lifecycle_lock:
+            with self._lock:
+                if self._closed:
+                    return
             self.stop()
-        except Exception as exc:
-            errors.append(exc)
-        try:
             self.events.stop()
-        except Exception as exc:
-            errors.append(exc)
-        with self._lock:
-            self._closed = True
-        if errors:
-            raise ExceptionGroup("MAVLink runtime close failed", errors)
+            with self._lock:
+                self._closed = True
 
     def reconnect(self) -> None:
-        self.stop()
-        self.start()
+        with self._lifecycle_lock:
+            self.stop()
+            self.start()
 
     def send(self, message: Any) -> None:
         self.client.send(message)

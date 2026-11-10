@@ -156,6 +156,11 @@ class ApplicationCodecTests(unittest.TestCase):
         self.assertGreater(assembler._assemblies[key].created_monotonic, first_created)
         self.assertNotIn(0, assembler._assemblies[key].fragments)
 
+    def test_assembler_rejects_nonfinite_fragment_timeouts(self) -> None:
+        for timeout in (math.nan, math.inf, -math.inf):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                MavApplicationAssembler(fragment_timeout=timeout)
+
     def test_maximum_encoded_packet_boundary(self) -> None:
         low = 0
         high = MavApplicationCodec.max_packet_bytes * 2
@@ -246,11 +251,19 @@ class ApplicationCodecTests(unittest.TestCase):
             b'{"type":"status","payload":[]} ',
             b'{"type":"","payload":{},"sent_at":1}',
             b'{"type":"status","payload":{},"sent_at":"invalid"}',
+            b'{"type":42,"payload":{},"sent_at":1}',
+            b'{"type":"status","payload":{},"sent_at":true}',
+            b'{"type":"status","payload":{},"sent_at":1,"reply":"false"}',
+            b'{"type":"status","payload":{},"sent_at":' + b"9" * 2_000 + b"}",
             b"\xff",
         )
         for body in invalid_bodies:
             with self.subTest(body=body), self.assertRaises(MavApplicationProtocolError):
                 MavApplicationCodec.decode_packet(1, body)
+        fragment = bytearray(MavApplicationCodec.encode(MavApplicationPacket("status"))[0])
+        fragment[3] = 1
+        with self.assertRaisesRegex(MavApplicationProtocolError, "flag"):
+            MavApplicationCodec.decode_fragment(fragment)
 
     def test_assembler_isolates_sources_and_discards_conflicting_packet_identity(self) -> None:
         first_packet = MavApplicationPacket(
@@ -308,6 +321,54 @@ class ApplicationCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(MavApplicationProtocolError, "byte sınırını"):
             assembler.accept(fragment)
 
+    def test_inflight_assemblies_are_bounded_per_source(self) -> None:
+        assembler = MavApplicationAssembler(
+            max_inflight_assemblies=4,
+            max_inflight_assemblies_per_source=1,
+        )
+        fragments = [
+            MavApplicationCodec.encode(
+                MavApplicationPacket(
+                    "data.large",
+                    {"text": "x" * 1_000},
+                    packet_id=packet_id,
+                )
+            )[0]
+            for packet_id in (10, 11)
+        ]
+
+        self.assertIsNone(assembler.accept(fragments[0], source_system=4, source_component=1))
+        with self.assertRaisesRegex(MavApplicationProtocolError, "kaynağı"):
+            assembler.accept(fragments[1], source_system=4, source_component=1)
+        self.assertIsNone(assembler.accept(fragments[1], source_system=5, source_component=1))
+        self.assertEqual(len(assembler._assemblies), 2)
+
+    def test_inflight_bytes_are_bounded_per_source(self) -> None:
+        assembler = MavApplicationAssembler(
+            max_inflight_bytes=2_000,
+            max_inflight_bytes_per_source=300,
+            max_inflight_assemblies_per_source=4,
+        )
+        fragments = [
+            MavApplicationCodec.encode(
+                MavApplicationPacket(
+                    "data.large",
+                    {"text": "x" * 1_000},
+                    packet_id=packet_id,
+                )
+            )[0]
+            for packet_id in (20, 21)
+        ]
+
+        self.assertIsNone(assembler.accept(fragments[0], source_system=4, source_component=1))
+        with self.assertRaisesRegex(MavApplicationProtocolError, "kaynağı"):
+            assembler.accept(fragments[1], source_system=4, source_component=1)
+        self.assertIsNone(assembler.accept(fragments[1], source_system=5, source_component=1))
+        self.assertEqual(
+            assembler._source_inflight_bytes[(4, 1)],
+            len(assembler._assemblies[(4, 1, 20)].fragments[0]),
+        )
+
     def test_completed_packet_history_is_bounded(self) -> None:
         assembler = MavApplicationAssembler(max_completed_packets=2)
         fragments = [
@@ -325,10 +386,7 @@ class ApplicationCodecTests(unittest.TestCase):
 class _ApplicationClient:
     def __init__(self) -> None:
         self.endpoint = MavEndpoint(source_system=42, source_component=3)
-        self.messages = EventBus[MavMessageEnvelope](
-            history=16,
-            routing_key=lambda envelope: envelope.message_type,
-        )
+        self.messages = EventBus[MavMessageEnvelope](history=16)
         self.calls: list[tuple[str, tuple[object, ...]]] = []
 
     def call_mav(self, method_name: str, *args: object) -> None:
@@ -413,6 +471,24 @@ class ApplicationChannelTests(unittest.TestCase):
 
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], MavApplicationProtocolError)
+        channel.stop()
+
+    def test_packet_subscriber_failures_are_reported_without_recursive_errors(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(client, network_id=14, message_type=420)
+        errors: list[Exception] = []
+        channel.errors.subscribe(errors.append)
+
+        def fail(_packet: MavApplicationPacket) -> None:
+            raise RuntimeError("subscriber failed")
+
+        channel.packets.subscribe(fail)
+        channel.start()
+        fragment = MavApplicationCodec.encode(MavApplicationPacket("status"))[0]
+        client.publish_fragment(fragment)
+
+        self.assertEqual(len(errors), 1)
+        self.assertEqual(str(errors[0]), "subscriber failed")
         channel.stop()
 
     def test_channel_send_fragments_and_pads_mavlink_extension_payloads(self) -> None:

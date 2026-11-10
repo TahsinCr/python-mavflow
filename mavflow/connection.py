@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import math
+import sys
 import threading
 import time
 from collections.abc import Callable
@@ -41,6 +43,7 @@ class MavConnection:
 
     @property
     def is_connected(self) -> bool:
+        """Return whether a raw connection object is open, not whether it is healthy."""
         with self._lifecycle_lock:
             return self._connection is not None
 
@@ -65,7 +68,14 @@ class MavConnection:
 
     @property
     def mavlink(self) -> Any:
-        """MAVLink constants and base message classes from the loaded dialect."""
+        """Return this connection's generated MAVLink dialect module when available."""
+        with self._lifecycle_lock:
+            connection = self._connection
+        message_encoder = getattr(connection, "mav", None)
+        if message_encoder is not None:
+            dialect = sys.modules.get(type(message_encoder).__module__)
+            if dialect is not None and getattr(dialect, "MAVLink", None) is type(message_encoder):
+                return dialect
         return self._load_mavutil().mavlink
 
     @property
@@ -83,6 +93,13 @@ class MavConnection:
             connection: Any | None = None
             try:
                 connection = self._create_connection()
+                if self.endpoint.signing_key is not None:
+                    setup_signing = getattr(connection, "setup_signing", None)
+                    if not callable(setup_signing):
+                        raise RuntimeError(
+                            "Configured MAVLink signing requires pymavlink setup_signing()"
+                        )
+                    setup_signing(self.endpoint.signing_key, sign_outgoing=True)
                 heartbeat = self._wait_vehicle_heartbeat(connection)
                 if heartbeat is None:
                     raise TimeoutError("MAVLink heartbeat zaman aşımı")
@@ -125,7 +142,31 @@ class MavConnection:
                     continue
                 raise TimeoutError("MAVLink uçuş cihazı heartbeat zaman aşımı")
             if not callable(classifier) or classifier(heartbeat):
-                return heartbeat
+                if self._matches_expected_peer(heartbeat):
+                    return heartbeat
+
+    def _matches_expected_peer(self, heartbeat: Any) -> bool:
+        expected_system = self.endpoint.expected_system
+        expected_component = self.endpoint.expected_component
+        if expected_system is None and expected_component is None:
+            return True
+
+        header = getattr(heartbeat, "_header", None)
+        get_source_system = getattr(heartbeat, "get_srcSystem", None)
+        get_source_component = getattr(heartbeat, "get_srcComponent", None)
+        source_system = (
+            get_source_system()
+            if callable(get_source_system)
+            else getattr(header, "srcSystem", None)
+        )
+        source_component = (
+            get_source_component()
+            if callable(get_source_component)
+            else getattr(header, "srcComponent", None)
+        )
+        return (expected_system is None or source_system == expected_system) and (
+            expected_component is None or source_component == expected_component
+        )
 
     def _send_discovery_heartbeat(self, connection: Any) -> None:
         """Advertise the GCS endpoint so a UDP server can route telemetry back."""
@@ -157,6 +198,8 @@ class MavConnection:
         Do not call this directly while the router is running; the router must
         remain the only reader.
         """
+        if timeout is not None and (not math.isfinite(timeout) or timeout < 0):
+            raise ValueError("MAVLink receive timeout must be finite and non-negative")
         normalized_condition = condition.strip() if condition else None
         kwargs: dict[str, Any] = {"blocking": blocking, "timeout": timeout}
         if message_types is not None:
@@ -171,6 +214,12 @@ class MavConnection:
             raise
 
     def evaluate_condition(self, condition: str) -> bool:
+        """Evaluate a trusted pymavlink condition expression.
+
+        pymavlink evaluates this expression with Python semantics. Never pass
+        text supplied by an untrusted peer; use an EventFlow predicate for
+        untrusted message filters.
+        """
         normalized = condition.strip()
         if not normalized:
             raise ValueError("MAVLink condition boş olamaz")

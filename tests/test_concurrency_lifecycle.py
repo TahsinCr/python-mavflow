@@ -6,7 +6,7 @@ import time
 import unittest
 from typing import Any
 
-from eventflow import AsyncEventQueue, EventBus
+from eventflow import AsyncEventQueue, EventBus, EventFilter
 
 from mavflow.application import MavApplicationPacket
 from mavflow.dispatch import MavApplicationDispatcher
@@ -79,8 +79,9 @@ class RouterLifecycleTests(unittest.TestCase):
         )
         publication.start()
         envelope = router.messages.wait_for(
-            routing_key="HEARTBEAT",
-            predicate=lambda item: item.sequence > boundary,
+            event_filter=EventFilter(
+                predicate=lambda item: item.message_type == "HEARTBEAT" and item.sequence > boundary
+            ),
             timeout=1.0,
         )
         publication.join(timeout=1.0)
@@ -117,11 +118,10 @@ class RouterLifecycleTests(unittest.TestCase):
 
 
 class AsyncEventQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
-    async def test_eventflow_queue_filters_router_envelopes_before_capacity(self) -> None:
+    async def test_eventflow_queue_capacity_includes_all_router_envelopes(self) -> None:
         router = MavMessageRouter(_RestartableConnection())  # type: ignore[arg-type]
         queue = AsyncEventQueue(
             router.messages,
-            routing_key="HEARTBEAT",
             capacity=1,
             overflow="drop_oldest",
         )
@@ -132,7 +132,8 @@ class AsyncEventQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
 
             received = await queue.receive()
             self.assertEqual(received.message.value, 2)
-            self.assertEqual(queue.stats().dropped, 1)
+            self.assertEqual(received.message_type, "HEARTBEAT")
+            self.assertEqual(queue.stats().dropped, 2)
         finally:
             await queue.aclose()
             router.messages.close()
@@ -175,13 +176,16 @@ class _ChannelStub:
 
 class PeerLifecycleTests(unittest.TestCase):
     def _peer(self, channel: _ChannelStub, **options: Any) -> MavApplicationPeer:
+        peer_options: dict[str, Any] = {
+            "heartbeat_interval": 0.02,
+            "heartbeat_timeout": 0.2,
+            "stop_timeout": 0.1,
+        }
+        peer_options.update(options)
         return MavApplicationPeer(
             channel,  # type: ignore[arg-type]
             role="onboard",
-            heartbeat_interval=0.02,
-            heartbeat_timeout=0.2,
-            stop_timeout=0.1,
-            **options,
+            **peer_options,
         )
 
     def test_stop_wakes_pending_request_and_prevents_later_packets(self) -> None:
@@ -251,7 +255,7 @@ class PeerLifecycleTests(unittest.TestCase):
 
     def test_request_accepts_only_correlated_response(self) -> None:
         channel = _ChannelStub()
-        peer = self._peer(channel)
+        peer = self._peer(channel, target_system=7, target_component=2)
         peer.start()
         sent = threading.Event()
         requests: list[MavApplicationPacket] = []
@@ -281,6 +285,26 @@ class PeerLifecycleTests(unittest.TestCase):
             MavApplicationPacket(
                 "system.ack",
                 {"request_id": requests[0].packet_id, "accepted": True},
+                source_system=7,
+                source_component=3,
+            )
+        )
+        self.assertTrue(requester.is_alive())
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.ack",
+                {"request_id": requests[0].packet_id, "accepted": True},
+                source_system=8,
+                source_component=2,
+            )
+        )
+        self.assertTrue(requester.is_alive())
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.ack",
+                {"request_id": requests[0].packet_id, "accepted": True},
+                source_system=7,
+                source_component=2,
             )
         )
         requester.join(1.0)
@@ -288,6 +312,48 @@ class PeerLifecycleTests(unittest.TestCase):
 
         self.assertFalse(requester.is_alive())
         self.assertEqual(responses[0].response.payload["accepted"], True)
+
+    def test_unexpected_peer_cannot_change_liveness_or_trigger_a_pong(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel, target_system=17, target_component=3)
+        peer.start()
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.heartbeat",
+                packet_id=101,
+                source_system=18,
+                source_component=3,
+            )
+        )
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.ping",
+                packet_id=102,
+                source_system=18,
+                source_component=3,
+            )
+        )
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.heartbeat",
+                packet_id=104,
+                source_system=17,
+                source_component=4,
+            )
+        )
+
+        self.assertFalse(peer.alive)
+        self.assertFalse(any(packet.packet_type == "system.pong" for packet in channel.sent))
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.heartbeat",
+                packet_id=103,
+                source_system=17,
+                source_component=3,
+            )
+        )
+        self.assertTrue(peer.alive)
+        peer.stop()
 
     def test_request_ignores_matching_id_with_unexpected_response_type(self) -> None:
         channel = _ChannelStub()
@@ -373,6 +439,16 @@ class PeerLifecycleTests(unittest.TestCase):
             peer.request("camera.capture", response_types="system.ack", timeout=0.1)
         with self.assertRaises(ValueError):
             peer.request("camera.capture", response_types="system.ack", timeout=0)
+        for timeout in (float("nan"), float("inf")):
+            with self.subTest(timeout=timeout), self.assertRaises(ValueError):
+                peer.request("camera.capture", response_types="system.ack", timeout=timeout)
+        for options in (
+            {"heartbeat_interval": float("nan")},
+            {"heartbeat_timeout": float("inf")},
+            {"stop_timeout": float("inf")},
+        ):
+            with self.subTest(options=options), self.assertRaises(ValueError):
+                self._peer(_ChannelStub(), **options)
 
         class FailingChannel(_ChannelStub):
             def start(self) -> None:

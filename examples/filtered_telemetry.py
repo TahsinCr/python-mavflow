@@ -5,7 +5,9 @@ from __future__ import annotations
 import argparse
 import time
 
-from mavflow import MavEndpoint, MavMessageEnvelope, MavRuntime
+from eventflow import EventFilter
+
+from mavflow import MavEndpoint, MavRuntime
 
 
 def main() -> int:
@@ -29,22 +31,25 @@ def main() -> int:
     endpoint = MavEndpoint.udp(args.host, args.port)
     runtime = MavRuntime(endpoint)
 
-    def predicate(envelope: MavMessageEnvelope) -> bool:
-        return envelope.source_system == args.system
-
     subscriptions = [
         runtime.messages.subscribe(
             lambda envelope: print(envelope.message),
-            routing_key=message_type,
-            predicate=predicate,
+            event_filter=EventFilter(
+                predicate=lambda envelope, selected_type=message_type: (
+                    envelope.message_type == selected_type and envelope.source_system == args.system
+                )
+            ),
         )
         for message_type in ("GLOBAL_POSITION_INT", "ATTITUDE")
     ]
     try:
         runtime.start()
         heartbeat = runtime.messages.wait_for(
-            routing_key="HEARTBEAT",
-            predicate=predicate,
+            event_filter=EventFilter(
+                predicate=lambda envelope: (
+                    envelope.message_type == "HEARTBEAT" and envelope.source_system == args.system
+                )
+            ),
             timeout=args.timeout,
         )
         if heartbeat is None:
