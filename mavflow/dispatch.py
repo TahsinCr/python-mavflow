@@ -171,7 +171,15 @@ class MavApplicationDispatcher:
                 max_workers=self._workers,
                 max_pending=self._max_pending,
             )
-            self._subscription = self._peer.packets.subscribe(self._on_packet)
+            try:
+                self._subscription = self._peer.packets.subscribe(self._on_packet)
+            except Exception:
+                work_pool = self._work_pool
+                self._work_pool = None
+                self._generation += 1
+                if work_pool is not None:
+                    work_pool.shutdown(wait=True, cancel_futures=True)
+                raise
 
     def _on_packet(self, packet: MavApplicationPacket) -> None:
         self.dispatch(packet)
@@ -274,34 +282,39 @@ class MavApplicationDispatcher:
                 str(exc),
                 {"error_type": exc.__class__.__name__},
             )
-        if error is None and packet.expects_response:
+        if packet.expects_response:
             try:
+                response_payload = self._response_payload(packet, result)
                 MavApplicationCodec.encode(
                     MavApplicationPacket(
                         result.response_type,
-                        result.payload,
-                        packet_id=1,
+                        response_payload,
+                        packet_id=0xFFFFFFFF,
                     )
                 )
             except Exception as exc:
-                error = exc
+                if error is None:
+                    error = exc
                 result = MavApplicationResult.failure(
                     "Application handler returned an invalid response",
                     {"error_type": exc.__class__.__name__},
                 )
+                response_payload = self._response_payload(packet, result)
+        else:
+            response_payload = None
         if not self._is_generation_active(generation):
             return
         if error is not None:
             self.errors.publish(error)
         self.handled.publish(MavApplicationDispatch(packet, result))
         if packet.expects_response:
-            self._respond(packet, result)
+            self._respond(packet, result, response_payload)
 
-    def _respond(
-        self,
+    @staticmethod
+    def _response_payload(
         request: MavApplicationPacket,
         result: MavApplicationResult,
-    ) -> None:
+    ) -> dict[str, Any]:
         payload = MavApplicationPacket._copy_payload_value(result.payload)
         payload.update(
             {
@@ -310,10 +323,21 @@ class MavApplicationDispatcher:
                 "message": result.message,
             }
         )
+        return payload
+
+    def _respond(
+        self,
+        request: MavApplicationPacket,
+        result: MavApplicationResult,
+        payload: Mapping[str, Any] | None = None,
+    ) -> None:
+        response_payload = (
+            payload if payload is not None else self._response_payload(request, result)
+        )
         try:
             self._peer.send(
                 result.response_type,
-                payload,
+                response_payload,
                 target_system=int(request.source_system or 0),
                 target_component=int(request.source_component or 0),
             )

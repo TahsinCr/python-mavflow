@@ -49,9 +49,11 @@ class _PendingRequest:
     event: threading.Event
     response_types: frozenset[str]
     started_monotonic: float
+    deadline_monotonic: float
     target_system: int
     target_component: int
     response: MavApplicationPacket | None = None
+    completed_monotonic: float | None = None
     error: str = ""
 
 
@@ -144,28 +146,36 @@ class MavApplicationPeer:
                 transport_available=self._transport_ready(),
                 last_error="",
             )
-        self._subscriptions = [
-            self._channel.packets.subscribe(self._on_packet),
-            self._channel.errors.subscribe(self._on_error),
-        ]
+        subscriptions: list[Subscription] = []
+        channel_start_attempted = False
         try:
+            subscriptions.append(self._channel.packets.subscribe(self._on_packet))
+            subscriptions.append(self._channel.errors.subscribe(self._on_error))
+            channel_start_attempted = True
             self._channel.start()
+            self._stop.clear()
+            self._wake.clear()
+            monitor_thread = threading.Thread(
+                target=self._monitor,
+                name=f"MavApplicationPeer[{self._role}]",
+                daemon=True,
+            )
+            self._monitor_thread = monitor_thread
+            monitor_thread.start()
+            self._subscriptions = subscriptions
         except Exception:
-            for subscription in self._subscriptions:
-                subscription.cancel()
             self._subscriptions.clear()
+            for subscription in subscriptions:
+                subscription.cancel()
+            if channel_start_attempted:
+                try:
+                    self._channel.stop()
+                except Exception as cleanup_error:
+                    self.errors.publish(cleanup_error)
+            self._monitor_thread = None
             with self._lock:
                 self._state = replace(self._state, running=False)
             raise
-
-        self._stop.clear()
-        self._wake.clear()
-        self._monitor_thread = threading.Thread(
-            target=self._monitor,
-            name=f"MavApplicationPeer[{self._role}]",
-            daemon=True,
-        )
-        self._monitor_thread.start()
         self.changed.publish(self.state)
         self._wake.set()
 
@@ -286,12 +296,15 @@ class MavApplicationPeer:
             self._target_component if target_component is None else target_component
         )
         packet_id = self._reserve_packet_id()
+        started_monotonic = time.monotonic()
+        deadline_monotonic = started_monotonic + float(timeout)
         pending = _PendingRequest(
-            threading.Event(),
-            normalized_responses,
-            time.monotonic(),
-            expected_system,
-            expected_component,
+            event=threading.Event(),
+            response_types=normalized_responses,
+            started_monotonic=started_monotonic,
+            deadline_monotonic=deadline_monotonic,
+            target_system=expected_system,
+            target_component=expected_component,
         )
         with self._lock:
             if not self._state.running:
@@ -311,10 +324,18 @@ class MavApplicationPeer:
                     on_sent(request)
                 except Exception as exc:
                     self.errors.publish(exc)
-            if not pending.event.wait(float(timeout)):
+            remaining = deadline_monotonic - time.monotonic()
+            if remaining <= 0:
+                raise TimeoutError(
+                    f"MAVLink application request deadline expired: {request.packet_type}"
+                )
+            if not pending.event.wait(remaining):
                 raise TimeoutError(f"MAVLink application response timed out: {request.packet_type}")
             if pending.error:
                 raise ConnectionError(pending.error)
+            completed_monotonic = pending.completed_monotonic
+            if completed_monotonic is None or completed_monotonic > deadline_monotonic:
+                raise TimeoutError(f"MAVLink application response timed out: {request.packet_type}")
             response = pending.response
             if response is None:
                 raise TimeoutError("MAVLink application response was empty")
@@ -392,8 +413,10 @@ class MavApplicationPeer:
                 pending_matches
                 and pending is not None
                 and packet.packet_type in pending.response_types
+                and now_monotonic <= pending.deadline_monotonic
             ):
                 pending.response = packet
+                pending.completed_monotonic = now_monotonic
                 pending.event.set()
             self._state = replace(
                 self._state,

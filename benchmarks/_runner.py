@@ -67,6 +67,7 @@ def _append_workload_arguments(command: list[str], args: argparse.Namespace) -> 
     for attribute, option in (
         ("messages", "--messages"),
         ("subscribers", "--subscribers"),
+        ("matching_ratio", "--matching-ratio"),
         ("payload_bytes", "--payload-bytes"),
     ):
         value: Any = getattr(args, attribute, None)

@@ -60,8 +60,22 @@ class PyperfRunnerTests(unittest.TestCase):
         benchmarks = (
             (
                 "benchmarks.benchmark_router",
-                ("--messages", "2", "--subscribers", "4"),
-                {"messages_per_batch": 2, "subscriber_count": 4},
+                (
+                    "--messages",
+                    "10",
+                    "--subscribers",
+                    "4",
+                    "--matching-ratio",
+                    "50",
+                ),
+                {
+                    "messages_per_batch": 10,
+                    "subscriber_count": 4,
+                    "matching_ratio_percent": 50,
+                    "matching_messages_per_batch": 5,
+                    "effective_matching_ratio_percent": 50.0,
+                    "completion_observer_count": 1,
+                },
             ),
             (
                 "benchmarks.benchmark_codec",

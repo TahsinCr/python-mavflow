@@ -64,6 +64,8 @@ class MavMessageRouter:
         self._stop_timeout = float(stop_timeout)
         self._condition = threading.Condition(threading.RLock())
         self._lifecycle_lock = threading.RLock()
+        self._stopping = False
+        self._cleanup_pending = False
         self._sequence = 0
         self._received_messages = 0
         self._receive_errors = 0
@@ -107,6 +109,12 @@ class MavMessageRouter:
 
     def start(self) -> None:
         with self._lifecycle_lock:
+            if self._stopping:
+                raise RuntimeError("MAVLink router hâlâ durduruluyor")
+            if self._cleanup_pending:
+                raise RuntimeError(
+                    "MAVLink router hâlâ durduruluyor; cleanup must complete before restart"
+                )
             if self._thread and self._thread.is_alive():
                 if self._stop_event.is_set():
                     raise RuntimeError("MAVLink router hâlâ durduruluyor")
@@ -128,27 +136,33 @@ class MavMessageRouter:
 
     def stop(self) -> None:
         with self._lifecycle_lock:
-            self._stop_event.set()
             thread = self._thread
-        if thread is threading.current_thread():
-            raise RuntimeError("MAVLink router kendi receive thread'inden durdurulamaz")
-        if thread is not None:
-            thread.join(timeout=self._stop_timeout)
-            if thread.is_alive():
-                raise TimeoutError(
-                    "MAVLink router receive thread'i zamanında durmadı; "
-                    "bağlantı güvenlik için açık bırakıldı"
-                )
-
+            if thread is threading.current_thread():
+                raise RuntimeError("MAVLink router kendi receive thread'inden durdurulamaz")
+            if self._stopping:
+                raise RuntimeError("MAVLink router stop işlemi zaten sürüyor")
+            self._stopping = True
+            self._cleanup_pending = True
+            self._stop_event.set()
         try:
+            if thread is not None:
+                thread.join(timeout=self._stop_timeout)
+                if thread.is_alive():
+                    raise TimeoutError(
+                        "MAVLink router receive thread'i zamanında durmadı; "
+                        "bağlantı güvenlik için açık bırakıldı"
+                    )
             self.connection.stop()
-        finally:
-            with self._lifecycle_lock:
-                if self._thread is thread:
-                    self._thread = None
             with self._condition:
                 self._running = False
                 self._condition.notify_all()
+            with self._lifecycle_lock:
+                if self._thread is thread:
+                    self._thread = None
+                self._cleanup_pending = False
+        finally:
+            with self._lifecycle_lock:
+                self._stopping = False
 
     close = stop
 
@@ -214,9 +228,12 @@ class MavMessageRouter:
             self._delivery_window.append((1, 0))
             return
         delta = (sequence - previous) & 0xFF
-        if not 0 < delta <= 64:
+        if delta == 0 or delta >= 192:
             return
         self._source_sequences[key] = sequence
+        if delta > 64:
+            self._delivery_window.append((1, 0))
+            return
         dropped = delta - 1
         self._estimated_dropped_messages += dropped
         self._delivery_window.append((1, dropped))

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+import time
 import unittest
 from types import SimpleNamespace
 from typing import Any
@@ -15,6 +16,8 @@ from mavflow import (
     MavRuntime,
 )
 from mavflow._compatibility import ExceptionGroup
+from mavflow.application import MavApplicationCodec
+from mavflow.message import MavMessageEnvelope
 
 
 class FakeConnection:
@@ -46,6 +49,10 @@ class FakeClient:
         self.is_connected = False
         self.calls = calls
         self.sent: list[Any] = []
+
+    @property
+    def messages(self) -> EventBus[Any]:
+        return self.router.messages
 
     def start(self) -> None:
         self.calls.append("client:start")
@@ -353,8 +360,11 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertIsNotNone(runtime.peer)
         self.assertIsNotNone(runtime.dispatcher)
         assert runtime.peer is not None
+        assert runtime.channel is not None
         self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_system), 7)
         self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_component), 3)
+        self.assertEqual(runtime.channel._source_systems, frozenset({7}))
+        self.assertEqual(runtime.channel._source_components, frozenset({3}))
         runtime.close()
 
     def test_application_role_accepts_explicit_peer_and_source_identity(self) -> None:
@@ -362,16 +372,66 @@ class MavRuntimeTests(unittest.TestCase):
             client=FakeClient([]),  # type: ignore[arg-type]
             application_role="gcs",
             peer_options={"target_system": 7, "target_component": 3},
-            channel_options={"source_systems": 7, "source_components": 3},
+            channel_options={"source_systems": (7, 8), "source_components": 3},
         )
 
         assert runtime.peer is not None
         assert runtime.channel is not None
         self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_system), 7)
         self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_component), 3)
-        self.assertEqual(runtime.channel._source_systems, frozenset({7}))
+        self.assertEqual(runtime.channel._source_systems, frozenset({7, 8}))
         self.assertEqual(runtime.channel._source_components, frozenset({3}))
         runtime.close()
+
+    def test_default_application_channel_blocks_unexpected_dispatcher_sources(self) -> None:
+        client = FakeClient([])
+        client.endpoint = MavEndpoint(expected_system=7, expected_component=3)
+        runtime = MavRuntime(client=client, application_role="gcs")  # type: ignore[arg-type]
+        assert runtime.channel is not None
+        assert runtime.dispatcher is not None
+        handled: list[int] = []
+        completed = threading.Event()
+
+        def handle(packet: MavApplicationPacket) -> None:
+            handled.append(packet.source_system or 0)
+            completed.set()
+
+        runtime.dispatcher.register("camera.capture", handle)
+        runtime.start()
+
+        def publish(source_system: int, source_component: int, packet_id: int) -> None:
+            fragment = MavApplicationCodec.encode(
+                MavApplicationPacket("camera.capture", packet_id=packet_id)
+            )[0]
+            message = SimpleNamespace(
+                payload=list(fragment),
+                target_network=runtime.channel.network_id,
+                message_type=runtime.channel.message_type,
+                target_system=0,
+                target_component=0,
+            )
+            client.router.messages.publish(
+                MavMessageEnvelope(
+                    sequence=packet_id,
+                    message=message,
+                    message_type="V2_EXTENSION",
+                    source_system=source_system,
+                    source_component=source_component,
+                    message_id=123,
+                    received_monotonic=time.monotonic(),
+                )
+            )
+
+        try:
+            publish(7, 3, 101)
+            self.assertTrue(completed.wait(1.0))
+            self.assertEqual(handled, [7])
+            completed.clear()
+            publish(8, 1, 102)
+            self.assertFalse(completed.wait(0.05))
+            self.assertEqual(handled, [7])
+        finally:
+            runtime.stop()
 
     def test_failed_shutdown_is_reported_and_can_be_retried(self) -> None:
         calls: list[str] = []

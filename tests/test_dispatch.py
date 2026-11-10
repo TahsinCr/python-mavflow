@@ -3,10 +3,15 @@ from __future__ import annotations
 import threading
 import unittest
 from typing import Any
+from unittest.mock import Mock, patch
 
 from eventflow import EventBus
 
-from mavflow.application import MavApplicationPacket, MavApplicationProtocolError
+from mavflow.application import (
+    MavApplicationCodec,
+    MavApplicationPacket,
+    MavApplicationProtocolError,
+)
 from mavflow.dispatch import MavApplicationDispatcher, MavApplicationHandlerRegistry
 
 
@@ -180,6 +185,91 @@ class DispatcherContractTests(unittest.TestCase):
         self.assertEqual(peer.sent[0][1]["request_id"], 89)
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], MavApplicationProtocolError)
+
+    def test_response_preflight_includes_final_metadata_at_packet_boundary(self) -> None:
+        maximum = MavApplicationCodec.max_packet_bytes
+
+        def response_fits(size: int, *, include_metadata: bool) -> bool:
+            candidate: dict[str, Any] = {"data": "x" * size}
+            if include_metadata:
+                candidate.update({"request_id": 89, "accepted": True, "message": ""})
+            try:
+                MavApplicationCodec.encode(
+                    MavApplicationPacket("system.ack", candidate, packet_id=0xFFFFFFFF)
+                )
+            except MavApplicationProtocolError:
+                return False
+            return True
+
+        low, high = 0, maximum
+        while low < high:
+            middle = (low + high + 1) // 2
+            if response_fits(middle, include_metadata=True):
+                low = middle
+            else:
+                high = middle - 1
+        payload_size = low + 16
+        payload = {"data": "x" * payload_size}
+        self.assertTrue(response_fits(payload_size, include_metadata=False))
+        final_payload = {
+            **payload,
+            "request_id": 89,
+            "accepted": True,
+            "message": "",
+        }
+        self.assertFalse(response_fits(payload_size, include_metadata=True))
+        with self.assertRaises(MavApplicationProtocolError):
+            MavApplicationCodec.encode(
+                MavApplicationPacket("system.ack", final_payload, packet_id=0xFFFFFFFF)
+            )
+
+        peer = _DispatchPeer()
+        dispatcher = MavApplicationDispatcher(peer)  # type: ignore[arg-type]
+        handled: list[Any] = []
+        errors: list[Exception] = []
+        completed = threading.Event()
+        dispatcher.handled.subscribe(lambda event: (handled.append(event), completed.set()))
+        dispatcher.errors.subscribe(errors.append)
+        dispatcher.register("camera.boundary", lambda _packet: payload)
+        dispatcher.start()
+        self.addCleanup(dispatcher.stop)
+
+        self.assertTrue(
+            dispatcher.dispatch(
+                MavApplicationPacket(
+                    "camera.boundary",
+                    packet_id=89,
+                    source_system=7,
+                    source_component=3,
+                    expects_response=True,
+                )
+            )
+        )
+        self.assertTrue(completed.wait(2.0))
+        self.assertTrue(peer.response_sent.wait(2.0))
+
+        self.assertFalse(handled[0].result.accepted)
+        self.assertEqual(peer.sent[0][0], "system.error")
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], MavApplicationProtocolError)
+
+    def test_dispatcher_subscription_failure_shuts_down_created_work_pool(self) -> None:
+        class FailingBus:
+            def subscribe(self, _callback: Any) -> None:
+                raise OSError("dispatcher subscription failed")
+
+        peer = _DispatchPeer()
+        peer.packets = FailingBus()  # type: ignore[assignment]
+        dispatcher = MavApplicationDispatcher(peer)  # type: ignore[arg-type]
+        work_pool = Mock()
+
+        with patch("mavflow.dispatch.BoundedWorkPool", return_value=work_pool):
+            with self.assertRaisesRegex(OSError, "dispatcher subscription failed"):
+                dispatcher.start()
+
+        work_pool.shutdown.assert_called_once_with(wait=True, cancel_futures=True)
+        self.assertIsNone(dispatcher._work_pool)
+        self.assertIsNone(dispatcher._subscription)
 
     def test_response_send_failures_are_published_without_losing_dispatch_result(self) -> None:
         peer = _DispatchPeer()

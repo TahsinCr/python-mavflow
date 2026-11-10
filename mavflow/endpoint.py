@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import ipaddress
 import math
 from dataclasses import dataclass, field
 from typing import Any
@@ -101,20 +100,10 @@ class MavEndpoint:
             raise ValueError("MAVLink host boş olamaz")
         if not 1 <= normalized_port <= 65535:
             raise ValueError("MAVLink port 1..65535 aralığında olmalı")
-        if normalized_host.startswith("[") and normalized_host.endswith("]"):
-            normalized_host = normalized_host[1:-1]
-        try:
-            address = ipaddress.ip_address(normalized_host)
-        except ValueError:
-            if ":" in normalized_host or any(
-                character.isspace() or character in "/\\[]" for character in normalized_host
-            ):
-                raise ValueError(
-                    "MAVLink host geçersiz; IPv6 adresini köşeli paranteze alın"
-                ) from None
-        else:
-            if address.version == 6:
-                normalized_host = f"[{normalized_host}]"
+        if ":" in normalized_host or any(
+            character.isspace() or character in "/\\[]" for character in normalized_host
+        ):
+            raise ValueError("pymavlink TCP/UDP transport IPv6 host adreslerini desteklemiyor")
         return f"{scheme}:{normalized_host}:{normalized_port}"
 
     @staticmethod
@@ -125,15 +114,12 @@ class MavEndpoint:
         address, separator, port_text = uri[len(scheme) + 1 :].rpartition(":")
         if not separator or not port_text.isdigit() or not address:
             raise ValueError(f"Geçersiz MAVLink ağ adresi: {uri}")
-        if address.startswith("[") and address.endswith("]"):
-            try:
-                ipaddress.IPv6Address(address[1:-1])
-            except ValueError as exc:
-                raise ValueError(f"Geçersiz MAVLink IPv6 adresi: {uri}") from exc
-        elif ":" in address or any(
+        if ":" in address or any(
             character.isspace() or character in "/\\[]" for character in address
         ):
-            raise ValueError(f"Geçersiz MAVLink ağ adresi: {uri}")
+            raise ValueError(
+                "pymavlink TCP/UDP transport IPv6 ve köşeli parantezli host adreslerini desteklemiyor"
+            )
         port = int(port_text)
         if not 1 <= port <= 65535:
             raise ValueError("MAVLink ağ portu 1..65535 aralığında olmalı; baud ayrı bir ayardır")

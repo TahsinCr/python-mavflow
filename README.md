@@ -211,6 +211,10 @@ reconnect setting, and heartbeat timeout. Its default URI is
 `udp:127.0.0.1:14550`. Use the address and transport mode expected by the
 vehicle, radio, simulator, or router.
 
+The built-in `pymavlink` TCP and UDP transports do not support IPv6 literals;
+Mavflow rejects IPv6 hosts instead of producing an endpoint the transport
+cannot open.
+
 `MavConnection` owns the underlying `pymavlink` connection. Importing
 `mavflow` does not open a device or load the transport module; `pymavlink` is
 loaded when a real connection is created. The connection provides lifecycle
@@ -370,6 +374,10 @@ with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as runtime:
 publication order and is bounded by `history_limit` (512 by default); it is
 in-memory, not a durable telemetry log. Router statistics include receive and
 dispatch errors, estimated dropped messages, and delivery quality.
+Sequence gaps up to 64 are counted modulo 256. A forward jump from 65 through
+191 triggers a new sequence baseline without claiming an exact loss count;
+backward reordering of up to 64 is ignored. These counters are estimates, not
+link-level delivery guarantees.
 
 <a id="async-applications"></a>
 ## Async applications
@@ -378,7 +386,10 @@ MAVLink transport reads remain owned by the synchronous router. Use EventFlow's
 `AsyncEventQueue` to receive the same envelopes in asyncio. EventFlow 1.3.2
 cannot apply a predicate before enqueueing, so all message types share its
 bounded capacity. Filter after `receive()` as shown; unrelated messages can
-also trigger the configured overflow policy.
+also trigger the configured overflow policy. With `drop_oldest`, unrelated
+telemetry can evict a heartbeat before the consumer reads it; EventFlow 1.3.2
+does not provide queue predicates or message-priority delivery, and Mavflow
+keeps using its queue directly rather than duplicating that behavior.
 
 ~~~python
 import asyncio
@@ -511,6 +522,10 @@ with MavRuntime(endpoint, application_role="ground-station") as link:
     print(response.response.payload)
 ~~~
 
+The request deadline includes synchronous sending and response waiting. Python
+cannot interrupt a transport send that is already blocking, so the call can
+return only after that send finishes and then report an expired deadline.
+
 The default response types are `system.ack` and `system.error`. The peer also
 tracks remote liveness and transport availability. Configure request deadlines
 and dispatcher capacity for the timing and workload of the application.
@@ -582,13 +597,16 @@ runtime.start()
 
 `signing_key` must be the 32-byte MAVLink 2 secret key. Mavflow configures
 pymavlink signing before waiting for the first heartbeat, signs outgoing frames,
-and leaves unsigned-message acceptance disabled. Optional expected system and
-component IDs filter heartbeat discovery; a runtime uses them as the peer's
-target defaults. `peer_options` can supply an explicit peer target, while
-`channel_options` restricts application packet sources. With no signing key,
-pymavlink's default unsigned behavior remains in effect. A peer target ID of `0`
-is a wildcard; system/component IDs are an allowlist aid, not cryptographic
-identity.
+and leaves unsigned-message acceptance disabled. Set `MAVLINK20=1` before
+importing pymavlink so its selected dialect uses MAVLink 2; Mavflow rejects a
+signing key when the active transport reports MAVLink 1. Optional expected
+system/component IDs filter heartbeat discovery and seed the default
+application-channel source allowlist and peer target. Integer targets in
+`peer_options` also seed that allowlist. Explicit `channel_options` source
+filters take precedence, so a deliberate multi-source policy remains possible.
+With no signing key, pymavlink's default unsigned behavior remains in effect. A
+peer target ID of `0` is a wildcard; system/component IDs are an allowlist aid,
+not cryptographic identity.
 
 `MavConnection.evaluate_condition()` passes condition text to pymavlink's
 Python expression evaluator. Never pass untrusted text to it. Synchronous
@@ -720,7 +738,7 @@ calibration, worker processes, and JSON result suites. Install the `dev` extra,
 then run a benchmark module from the repository root:
 
 ~~~bash
-python -m benchmarks.benchmark_router --output router-run.json
+python -m benchmarks.benchmark_router --subscribers 10 --matching-ratio 10 --output router-run.json
 python -m benchmarks.benchmark_codec --output codec-run.json
 python -m pyperf show --metadata --stats router-run.json
 python -m pyperf compare_to --table benchmarks/results/router.json router-run.json
@@ -729,9 +747,11 @@ python -m pyperf compare_to --table benchmarks/results/router.json router-run.js
 Use a fresh output filename for each run; pyperf does not overwrite an
 existing result file. The router benchmark measures single-reader delivery
 through a preloaded in-memory connection. Set `--subscribers` to compare
-matching EventFlow callback fan-out (for example, 1, 10, or 100 subscribers).
-This is a router delivery benchmark; the real UDP loopback test is a separate
-correctness check. The codec benchmark measures
+EventFlow callback fan-out (for example, 1, 10, or 100 subscribers) and
+`--matching-ratio` to measure 0%, 10%, 50%, or 100% matching traffic. A single
+completion observer ensures the timed interval includes the final envelope
+dispatch and is recorded in metadata. This is a router delivery benchmark; the
+real UDP loopback test is a separate correctness check. The codec benchmark measures
 application packet encoding and reassembly. `--fast` is for CI smoke checks;
 use the default calibration for local measurements. Results are specific to
 their recorded interpreter, platform, source fingerprint, and workload. They

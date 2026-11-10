@@ -116,6 +116,47 @@ class RouterLifecycleTests(unittest.TestCase):
         self.assertEqual(connection.stop_count, 1)
         self.assertFalse(router.running)
 
+    def test_router_rejects_restart_until_direct_stop_finishes_connection_cleanup(self) -> None:
+        class BlockingStopConnection(_RestartableConnection):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stop_entered = threading.Event()
+                self.release_stop = threading.Event()
+
+            def stop(self) -> None:
+                self.stop_entered.set()
+                if not self.release_stop.wait(1.0):
+                    raise TimeoutError("test connection stop was not released")
+                super().stop()
+
+        connection = BlockingStopConnection()
+        router = MavMessageRouter(
+            connection,  # type: ignore[arg-type]
+            poll_timeout=0.01,
+            stop_timeout=0.2,
+        )
+        router.start()
+        stop_errors: list[Exception] = []
+
+        def stop_router() -> None:
+            try:
+                router.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        stopping = threading.Thread(target=stop_router)
+        stopping.start()
+        self.assertTrue(connection.stop_entered.wait(1.0))
+        with self.assertRaisesRegex(RuntimeError, "durduruluyor"):
+            router.start()
+        connection.release_stop.set()
+        stopping.join(1.0)
+
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(stop_errors, [])
+        router.start()
+        router.stop()
+
 
 class AsyncEventQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
     async def test_eventflow_queue_capacity_includes_all_router_envelopes(self) -> None:
@@ -134,6 +175,27 @@ class AsyncEventQueueIntegrationTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(received.message.value, 2)
             self.assertEqual(received.message_type, "HEARTBEAT")
             self.assertEqual(queue.stats().dropped, 2)
+        finally:
+            await queue.aclose()
+            router.messages.close()
+            router.errors.close()
+
+    async def test_unrelated_telemetry_can_evict_a_heartbeat_from_eventflow_queue(self) -> None:
+        router = MavMessageRouter(_RestartableConnection())  # type: ignore[arg-type]
+        queue = AsyncEventQueue(
+            router.messages,
+            capacity=1,
+            overflow="drop_oldest",
+        )
+        try:
+            router.messages.publish(MavMessageEnvelope.wrap(1, _Message("HEARTBEAT", 1)))
+            router.messages.publish(MavMessageEnvelope.wrap(2, _Message("ATTITUDE", 2)))
+
+            received = await queue.receive()
+
+            self.assertEqual(received.message_type, "ATTITUDE")
+            self.assertEqual(received.message.value, 2)
+            self.assertEqual(queue.stats().dropped, 1)
         finally:
             await queue.aclose()
             router.messages.close()
@@ -461,6 +523,69 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertFalse(failed_peer.running)
         failing_channel.packets.publish(MavApplicationPacket("system.heartbeat"))
         self.assertEqual(failed_peer.state.packets_in, 0)
+
+    def test_second_subscription_failure_cancels_the_first_and_resets_peer(self) -> None:
+        class TrackedSubscription:
+            cancelled = False
+
+            def cancel(self) -> None:
+                self.cancelled = True
+
+        class Bus:
+            def __init__(self, fail: bool = False) -> None:
+                self.fail = fail
+                self.subscription: TrackedSubscription | None = None
+
+            def subscribe(self, _callback: Any) -> TrackedSubscription:
+                if self.fail:
+                    raise OSError("second subscription failed")
+                self.subscription = TrackedSubscription()
+                return self.subscription
+
+        channel = _ChannelStub()
+        packets = Bus()
+        channel.packets = packets  # type: ignore[assignment]
+        channel.errors = Bus(fail=True)  # type: ignore[assignment]
+        peer = self._peer(channel)
+
+        with self.assertRaisesRegex(OSError, "second subscription failed"):
+            peer.start()
+
+        self.assertFalse(peer.running)
+        assert packets.subscription is not None
+        self.assertTrue(packets.subscription.cancelled)
+        self.assertFalse(channel.started)
+
+    def test_request_timeout_is_an_absolute_deadline_for_late_responses(self) -> None:
+        class LateResponseChannel(_ChannelStub):
+            def send(self, *args: Any, **kwargs: Any) -> MavApplicationPacket:
+                request = super().send(*args, **kwargs)
+                if kwargs.get("expects_response"):
+                    time.sleep(0.05)
+                    self.packets.publish(
+                        MavApplicationPacket(
+                            "system.ack",
+                            {"request_id": request.packet_id},
+                            packet_id=90,
+                            source_system=7,
+                            source_component=3,
+                        )
+                    )
+                return request
+
+        channel = LateResponseChannel()
+        peer = self._peer(channel)
+        peer.start()
+        self.addCleanup(peer.stop)
+
+        with self.assertRaisesRegex(TimeoutError, "deadline expired"):
+            peer.request(
+                "camera.capture",
+                response_types="system.ack",
+                timeout=0.02,
+                target_system=7,
+                target_component=3,
+            )
 
     def test_request_timeout_and_liveness_expiry(self) -> None:
         channel = _ChannelStub()

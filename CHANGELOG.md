@@ -6,8 +6,9 @@ All notable changes to Mavflow are documented here.
 
 ### Added
 
-- Measure router callback fan-out with a configurable number of matching
-  EventFlow subscribers in the pyperf router benchmark.
+- Measure router callback fan-out across subscriber counts and 0%, 10%, 50%,
+  and 100% message-filter match ratios in the pyperf router benchmark; include
+  the MAVLink sequence path in benchmark messages.
 - Configure optional MAVLink 2 signing on `MavEndpoint` before heartbeat
   discovery and keep signing keys out of endpoint representations.
 - Filter initial heartbeat discovery by optional expected system/component IDs
@@ -56,9 +57,20 @@ All notable changes to Mavflow are documented here.
 - Reject malformed application packet fields, nonzero reserved header flags,
   and oversized remote-log batches before constructing their records.
 - Bound fragment assemblies per MAVLink source and ignore out-of-order packets
-  when estimating sequence loss.
+  when estimating sequence loss; resynchronize after ambiguous large forward
+  jumps instead of leaving the sequence baseline stale.
 - Validate finite timeout values and handler response payloads before reporting
   them as handled.
+- Apply known peer system/component IDs to the default application channel's
+  source allowlist and keep explicitly supplied channel source filters intact.
+- Reject IPv6 endpoints unsupported by pymavlink's built-in TCP/UDP transports
+  and reject signing when the active transport does not use MAVLink 2.
+- Roll back partial peer and dispatcher startup, prevent direct router
+  restart during connection cleanup, and count request send time against its
+  monotonic deadline.
+- Preflight the complete application response, including correlation metadata,
+  before sending it.
+- Refresh pyperf router and codec result files against the current source.
 - Document that pymavlink condition expressions must come from trusted code,
   and that `is_connected` reports an open raw connection rather than peer health.
 

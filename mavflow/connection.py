@@ -94,6 +94,12 @@ class MavConnection:
             try:
                 connection = self._create_connection()
                 if self.endpoint.signing_key is not None:
+                    is_mavlink2 = getattr(connection, "mavlink20", None)
+                    if not callable(is_mavlink2) or not is_mavlink2():
+                        raise ValueError(
+                            "MAVLink signing requires a MAVLink 2 pymavlink dialect; "
+                            "set MAVLINK20=1 before pymavlink is imported"
+                        )
                     setup_signing = getattr(connection, "setup_signing", None)
                     if not callable(setup_signing):
                         raise RuntimeError(
@@ -302,16 +308,22 @@ class MavConnection:
             raise
 
     def stop(self) -> None:
+        connection: Any | None = None
+        close_error: Exception | None = None
         with self._send_lock, self._receive_lock, self._lifecycle_lock:
             connection = self._connection
-            self._connection = None
-        if connection is not None:
+            if connection is None:
+                return
             try:
                 connection.close()
             except Exception as exc:
-                self._publish_error(exc)
-                raise
-            self.connection_changed.publish(False)
+                close_error = exc
+            else:
+                self._connection = None
+        if close_error is not None:
+            self._publish_error(close_error)
+            raise close_error
+        self.connection_changed.publish(False)
 
     def _create_connection(self) -> Any:
         if self._connection_factory is not None:

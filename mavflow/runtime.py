@@ -61,10 +61,6 @@ class MavRuntime:
             raise ValueError("A custom dispatcher requires an application peer")
 
         if peer is None and role:
-            channel = channel or MavApplicationChannel(
-                self.client,
-                **dict(channel_options or {}),
-            )
             peer_config = dict(peer_options or {})
             peer_config.setdefault(
                 "target_system",
@@ -79,6 +75,21 @@ class MavRuntime:
                 else lambda: self.connection.target_component,
             )
             peer_config.setdefault("transport_available", lambda: self.client.is_connected)
+            if channel is None:
+                resolved_channel_options = dict(channel_options or {})
+                for channel_key, peer_key in (
+                    ("source_systems", "target_system"),
+                    ("source_components", "target_component"),
+                ):
+                    peer_target = peer_config[peer_key]
+                    if (
+                        channel_key not in resolved_channel_options
+                        and isinstance(peer_target, int)
+                        and not isinstance(peer_target, bool)
+                        and peer_target != 0
+                    ):
+                        resolved_channel_options[channel_key] = peer_target
+                channel = MavApplicationChannel(self.client, **resolved_channel_options)
             peer = MavApplicationPeer(channel, role=role, **peer_config)
         self.channel = channel
         self.peer = peer

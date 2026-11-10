@@ -210,6 +210,9 @@ Endpoint ayrıca yerel system ve component kimliklerini, MAVLink dialect'ini,
 yeniden bağlanma ayarını ve heartbeat timeout değerini taşır. Varsayılan URI
 `udp:127.0.0.1:14550`'dir. Araç, radyo, simülatör veya router tarafından
 beklenen adresi ve transport biçimini seçin.
+Yerleşik `pymavlink` TCP ve UDP transport'ları IPv6 literal adreslerini
+desteklemez; Mavflow transport'un açamayacağı bir endpoint üretmek yerine IPv6
+host'larını erken reddeder.
 
 `MavConnection`, alttaki `pymavlink` bağlantısının sahibidir. `mavflow`
 import edildiğinde bir cihaz açılmaz ve transport modülü yüklenmez; `pymavlink`
@@ -370,6 +373,10 @@ with MavRuntime(MavEndpoint.udp("0.0.0.0", 14550)) as runtime:
 ve `history_limit` (varsayılan 512) sınırı içinde tutar; kalıcı bir telemetri
 logu değildir. Router istatistikleri okuma/dispatch hatalarını, tahmini kaybı
 ve teslimat kalitesini içerir.
+Modulo 256 sequence farkında 64'e kadarki boşluklar sayılır. 65 ile 191
+arasındaki ileri sıçrama, kesin kayıp sayısı iddia etmeden sequence başlangıcını
+yeniler; 64'e kadarki geriye sıralanma yok sayılır. Bu sayaçlar tahmindir, link
+seviyesinde teslimat garantisi değildir.
 
 <a id="async-applications"></a>
 ## Async uygulamalar
@@ -378,7 +385,10 @@ MAVLink transport okuması senkron router'ın sahipliğinde kalır. Aynı
 envelope'ları asyncio içinde almak için EventFlow `AsyncEventQueue` kullanın.
 EventFlow 1.3.2 kuyruğa eklemeden önce predicate uygulayamadığından tüm mesaj
 tipleri sınırlı kapasiteyi paylaşır. Örnekteki gibi `receive()` sonrasında
-filtreleyin; ilgisiz mesajlar da taşma politikasını tetikleyebilir.
+filtreleyin; ilgisiz mesajlar da taşma politikasını tetikleyebilir. `drop_oldest`
+kullanılırken ilgisiz telemetri, tüketici almadan önce heartbeat'i kuyruktan
+çıkarabilir. EventFlow 1.3.2 queue predicate'i veya mesaj önceliği sağlamaz;
+Mavflow bu davranışı yeniden yazmak yerine EventFlow kuyruğunu doğrudan kullanır.
 
 ~~~python
 import asyncio
@@ -513,6 +523,9 @@ with MavRuntime(endpoint, application_role="ground-station") as link:
 Varsayılan yanıt tipleri `system.ack` ve `system.error`'dur. Peer ayrıca uzak
 canlılığı ve transport kullanılabilirliğini izler. İstek zaman aşımını ve
 dispatcher kapasitesini uygulamanın çalışma yüküne göre ayarlayın.
+Request deadline'ı senkron gönderim ve yanıt bekleme süresinin tamamını kapsar.
+Bloklanan transport gönderimini Python kesemez; çağrı gönderim tamamlandıktan
+sonra deadline'ın dolduğunu bildirir.
 
 <a id="remote-logs"></a>
 ### Uzak log modelleri
@@ -581,13 +594,16 @@ runtime.start()
 
 `signing_key`, 32 byte'lık MAVLink 2 gizli anahtarı olmalıdır. Mavflow, ilk
 heartbeat beklenmeden önce pymavlink imzalamasını kurar, giden frame'leri
-imzalar ve imzasız mesaj kabulünü kapalı tutar. İsteğe bağlı beklenen system ve
-component ID'leri heartbeat keşfini filtreler; runtime bunları peer hedefinin
-varsayılanı olarak kullanır. `peer_options` peer hedefini açıkça belirleyebilir,
-`channel_options` uygulama paketlerinin kaynak ID'lerini sınırlar. Anahtar
-verilmezse pymavlink'in varsayılan imzasız davranışı geçerli olur. Peer hedefindeki
-`0`, wildcard anlamına gelir; system/component ID'leri kriptografik kimlik
-değildir.
+imzalar ve imzasız mesaj kabulünü kapalı tutar. pymavlink import edilmeden önce
+MAVLink 2 dialect'i seçmek için `MAVLINK20=1` ayarlayın; etkin transport MAVLink
+1 bildirirse Mavflow signing anahtarını reddeder. İsteğe bağlı beklenen system ve
+component ID'leri heartbeat keşfini filtreler; varsayılan application channel
+kaynak izin listesine ve peer hedeflerine aktarılır. Tamsayı `peer_options`
+hedefleri de bu izin listesini oluşturur. Açık `channel_options` kaynak
+filtreleri önceliklidir, böylece bilinçli çoklu kaynak politikası korunur.
+Anahtar verilmezse pymavlink'in varsayılan imzasız davranışı geçerli olur. Peer
+hedefindeki `0`, wildcard anlamına gelir; system/component ID'leri kriptografik
+kimlik değildir.
 
 `MavConnection.evaluate_condition()` condition metnini pymavlink'in Python
 ifade değerlendiricisine verir. Bu metoda güvenilmeyen metin göndermeyin.
@@ -721,7 +737,7 @@ Benchmark paketi kalibrasyon, worker süreçleri ve JSON sonuç dosyaları için
 sonra benchmark modülünü proje kökünden çalıştırın:
 
 ~~~bash
-python -m benchmarks.benchmark_router --output router-run.json
+python -m benchmarks.benchmark_router --subscribers 10 --matching-ratio 10 --output router-run.json
 python -m benchmarks.benchmark_codec --output codec-run.json
 python -m pyperf show --metadata --stats router-run.json
 python -m pyperf compare_to --table benchmarks/results/router.json router-run.json
@@ -730,8 +746,10 @@ python -m pyperf compare_to --table benchmarks/results/router.json router-run.js
 Her çalıştırma için kullanılmamış bir çıktı dosyası seçin; pyperf mevcut
 dosyanın üzerine yazmaz. Router benchmark'ı önceden doldurulmuş bellek içi
 connection üzerinden tek okuyuculu teslimatı ölçer. Eşleşen EventFlow callback
-fan-out sayısını karşılaştırmak için `--subscribers` değerini değiştirin
-(ör. 1, 10 veya 100). Bu router teslimat benchmark'ıdır; gerçek UDP loopback
+fan-out sayısını karşılaştırmak için `--subscribers` (ör. 1, 10 veya 100), eşleşen
+trafik oranı için `--matching-ratio` (0, 10, 50 veya 100) değerini değiştirin.
+Tek bir tamamlama gözlemcisi, ölçümün son envelope dispatch'ini kapsamasını sağlar
+ve metadata'da belirtilir. Bu router teslimat benchmark'ıdır; gerçek UDP loopback
 testi ayrı bir doğruluk kontrolüdür. Codec benchmark'ı
 uygulama paketi kodlama ve birleştirmeyi ölçer. `--fast` yalnız CI smoke
 kontrolleri içindir; yerel ölçümlerde varsayılan kalibrasyonu kullanın.

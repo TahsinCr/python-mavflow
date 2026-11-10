@@ -29,8 +29,6 @@ class EndpointTests(unittest.TestCase):
         self.assertEqual(MavEndpoint("127.0.0.1:5760").uri, "tcp:127.0.0.1:5760")
         self.assertEqual(MavEndpoint.tcp("localhost", 5760).uri, "tcp:localhost:5760")
         self.assertEqual(MavEndpoint.udp("0.0.0.0", 14550).uri, "udp:0.0.0.0:14550")
-        self.assertEqual(MavEndpoint.udp("::1", 14550).uri, "udp:[::1]:14550")
-        self.assertEqual(MavEndpoint("[::1]:14550").uri, "tcp:[::1]:14550")
         serial = MavEndpoint.serial(" /dev/ttyUSB0 ", baud=57600)
         self.assertEqual((serial.uri, serial.baud), ("/dev/ttyUSB0", 57600))
 
@@ -41,10 +39,13 @@ class EndpointTests(unittest.TestCase):
             "udp:host:not-a-port",
             "tcp::14550",
             "udp:[not-ip]:14550",
+            "udp:[::1]:14550",
             "tcp:2001:db8::1:14550",
         ):
             with self.subTest(uri=uri), self.assertRaises(ValueError):
                 MavEndpoint(uri)
+        with self.assertRaisesRegex(ValueError, "IPv6"):
+            MavEndpoint.udp("::1", 14550)
         with self.assertRaises(ValueError):
             MavEndpoint(source_system=256)
         for field, value in (("expected_system", 256), ("expected_component", -1)):
@@ -132,6 +133,9 @@ class _RawConnection:
         self.operations: list[str] = []
         self.signing_calls: list[tuple[bytes, bool, object]] = []
 
+    def mavlink20(self) -> bool:
+        return True
+
     def setup_signing(
         self,
         secret_key: bytes,
@@ -218,9 +222,82 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(raw.signing_calls, [(secret, True, None)])
         connection.stop()
 
+    def test_signing_rejects_a_mavlink_1_dialect_before_heartbeat(self) -> None:
+        class Mavlink1Connection(_RawConnection):
+            def mavlink20(self) -> bool:
+                return False
+
+        raw = Mavlink1Connection(["vehicle"])
+        connection = MavConnection(
+            MavEndpoint(signing_key=b"s" * 32),
+            connection_factory=lambda _endpoint: raw,
+        )
+
+        with self.assertRaisesRegex(ValueError, "MAVLink 2"):
+            connection.start()
+
+        self.assertEqual(raw.operations, [])
+        self.assertEqual(raw.closed, 1)
+
+    def test_direct_connect_and_stop_do_not_close_during_heartbeat_handshake(self) -> None:
+        class BlockingHeartbeatConnection(_RawConnection):
+            def __init__(self) -> None:
+                super().__init__(["vehicle"])
+                self.heartbeat_entered = threading.Event()
+                self.release_heartbeat = threading.Event()
+
+            def wait_heartbeat(self, *, timeout: float) -> Any:
+                self.operations.append("heartbeat")
+                self.heartbeat_entered.set()
+                if not self.release_heartbeat.wait(timeout):
+                    return None
+                return self.heartbeats.pop(0)
+
+        raw = BlockingHeartbeatConnection()
+        connection = MavConnection(
+            MavEndpoint(heartbeat_timeout=1.0),
+            connection_factory=lambda _endpoint: raw,
+        )
+        connection_errors: list[Exception] = []
+        stop_errors: list[Exception] = []
+        stop_started = threading.Event()
+
+        def connect() -> None:
+            try:
+                connection.start()
+            except Exception as exc:
+                connection_errors.append(exc)
+
+        def stop() -> None:
+            stop_started.set()
+            try:
+                connection.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        connecting = threading.Thread(target=connect)
+        connecting.start()
+        self.assertTrue(raw.heartbeat_entered.wait(1.0))
+        stopping = threading.Thread(target=stop)
+        stopping.start()
+        self.assertTrue(stop_started.wait(1.0))
+        threading.Event().wait(0.02)
+        self.assertEqual(raw.closed, 0)
+
+        raw.release_heartbeat.set()
+        connecting.join(1.0)
+        stopping.join(1.0)
+
+        self.assertFalse(connecting.is_alive())
+        self.assertFalse(stopping.is_alive())
+        self.assertEqual(connection_errors, [])
+        self.assertEqual(stop_errors, [])
+        self.assertEqual(raw.closed, 1)
+        self.assertFalse(connection.is_connected)
+
     def test_configured_signing_fails_closed_without_pymavlink_support(self) -> None:
         closed: list[bool] = []
-        raw = SimpleNamespace(close=lambda: closed.append(True))
+        raw = SimpleNamespace(mavlink20=lambda: True, close=lambda: closed.append(True))
         connection = MavConnection(
             MavEndpoint(signing_key=b"s" * 32),
             connection_factory=lambda _endpoint: raw,

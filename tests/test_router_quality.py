@@ -76,6 +76,23 @@ class RouterQualityTests(unittest.TestCase):
         self.assertEqual(stats.estimated_dropped_messages, 2)
         self.assertEqual(stats.delivery_quality, 75)
 
+    def test_large_forward_sequence_jump_resynchronizes_baseline(self) -> None:
+        connection = _RouterConnection()
+        router = MavMessageRouter(
+            connection,  # type: ignore[arg-type]
+            poll_timeout=0.01,
+            stop_timeout=0.2,
+        )
+        router.start()
+        self.addCleanup(router.stop)
+        for sequence in (1, 100, 101):
+            connection.inbox.put(_SequencedMessage(sequence))
+
+        self._wait_for(lambda: router.stats.received_messages == 3)
+
+        self.assertEqual(router.stats.estimated_dropped_messages, 0)
+        self.assertEqual(router.stats.delivery_quality, 100)
+
     def test_envelope_and_quality_errors_do_not_stop_reader(self) -> None:
         class _InvalidType:
             def get_type(self) -> str:

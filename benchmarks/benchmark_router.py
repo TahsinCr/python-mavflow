@@ -14,11 +14,15 @@ from ._runner import create_runner, positive_integer
 
 
 class _Message:
-    def __init__(self, sequence: int) -> None:
+    def __init__(self, sequence: int, message_type: str) -> None:
         self.sequence = sequence
+        self.message_type = message_type
 
     def get_type(self) -> str:
-        return "HEARTBEAT"
+        return self.message_type
+
+    def get_seq(self) -> int:
+        return self.sequence & 0xFF
 
     def get_msgId(self) -> int:
         return 0
@@ -54,21 +58,29 @@ class _Connection:
         return True
 
 
-def _sample(messages_per_batch: int, subscriber_count: int) -> float:
+def _sample(messages_per_batch: int, subscriber_count: int, matching_ratio: int) -> float:
     messages: queue.Queue[_Message] = queue.Queue(maxsize=messages_per_batch)
     for sequence in range(messages_per_batch):
-        messages.put(_Message(sequence))
+        matches = ((sequence + 1) * matching_ratio // 100) > (sequence * matching_ratio // 100)
+        message_type = "HEARTBEAT" if matches else "ATTITUDE"
+        messages.put(_Message(sequence, message_type))
     release = threading.Event()
     connection = _Connection(messages, release)
     router = MavMessageRouter(connection, poll_timeout=0.002, stop_timeout=2.0)  # type: ignore[arg-type]
     delivered = 0
-    completed = threading.Event()
+    expected_callbacks = (messages_per_batch * matching_ratio // 100) * subscriber_count
+    callbacks_complete = threading.Event()
+    processing_complete = threading.Event()
+    final_sequence = router.sequence + messages_per_batch
 
     def receive(_envelope: object) -> None:
         nonlocal delivered
         delivered += 1
-        if delivered == messages_per_batch * subscriber_count:
-            completed.set()
+        if delivered == expected_callbacks:
+            callbacks_complete.set()
+
+    def receive_final(_envelope: object) -> None:
+        processing_complete.set()
 
     for _ in range(subscriber_count):
         router.messages.subscribe(
@@ -77,24 +89,33 @@ def _sample(messages_per_batch: int, subscriber_count: int) -> float:
                 predicate=lambda envelope: envelope.message_type == "HEARTBEAT"
             ),
         )
+    router.messages.subscribe(
+        receive_final,
+        event_filter=EventFilter(predicate=lambda envelope: envelope.sequence == final_sequence),
+    )
     router.start()
     started = time.perf_counter()
     release.set()
     try:
-        if not completed.wait(30.0):
-            expected = messages_per_batch * subscriber_count
-            raise TimeoutError(f"Router delivered {delivered} of {expected} callbacks")
+        if not processing_complete.wait(30.0):
+            raise TimeoutError(f"Router did not process all {messages_per_batch} messages")
+        if expected_callbacks and not callbacks_complete.wait(30.0):
+            raise TimeoutError(f"Router delivered {delivered} of {expected_callbacks} callbacks")
         elapsed = time.perf_counter() - started
     finally:
         router.stop()
-    expected = messages_per_batch * subscriber_count
-    if delivered != expected:
-        raise RuntimeError(f"Router delivered {delivered} of {expected} callbacks")
+    if delivered != expected_callbacks:
+        raise RuntimeError(f"Router delivered {delivered} of {expected_callbacks} callbacks")
     return elapsed
 
 
-def _time_batches(loops: int, messages_per_batch: int, subscriber_count: int) -> float:
-    return sum(_sample(messages_per_batch, subscriber_count) for _ in range(loops))
+def _time_batches(
+    loops: int,
+    messages_per_batch: int,
+    subscriber_count: int,
+    matching_ratio: int,
+) -> float:
+    return sum(_sample(messages_per_batch, subscriber_count, matching_ratio) for _ in range(loops))
 
 
 def main() -> None:
@@ -109,7 +130,14 @@ def main() -> None:
         "--subscribers",
         type=positive_integer,
         default=1,
-        help="matching EventFlow callbacks receiving each message",
+        help="EventFlow callbacks subscribed to HEARTBEAT",
+    )
+    runner.argparser.add_argument(
+        "--matching-ratio",
+        type=int,
+        choices=(0, 10, 50, 100),
+        default=100,
+        help="percentage of routed messages matching HEARTBEAT subscribers",
     )
     args = runner.parse_args()
     runner.bench_time_func(
@@ -117,13 +145,20 @@ def main() -> None:
         _time_batches,
         args.messages,
         args.subscribers,
+        args.matching_ratio,
         inner_loops=args.messages,
         metadata={
             "transport": "preloaded in-memory fake connection",
-            "message_type": "HEARTBEAT",
+            "message_types": "HEARTBEAT,ATTITUDE",
             "messages_per_batch": args.messages,
             "subscriber_count": args.subscribers,
-            "timed_region": "router start through final callback; setup excluded",
+            "matching_ratio_percent": args.matching_ratio,
+            "matching_messages_per_batch": args.messages * args.matching_ratio // 100,
+            "effective_matching_ratio_percent": (args.messages * args.matching_ratio // 100)
+            / args.messages
+            * 100,
+            "completion_observer_count": 1,
+            "timed_region": "router start through final envelope dispatch; setup excluded",
         },
     )
 
