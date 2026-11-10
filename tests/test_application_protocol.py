@@ -4,15 +4,22 @@ import math
 import time
 import unittest
 from collections.abc import Mapping
+from types import SimpleNamespace
+from typing import cast
+
+from eventflow import EventBus
 
 from mavflow import application as application_module
 from mavflow.application import (
     MavApplicationAssembler,
+    MavApplicationChannel,
     MavApplicationCodec,
     MavApplicationPacket,
     MavApplicationProtocolError,
 )
 from mavflow.dispatch import MavApplicationResult
+from mavflow.endpoint import MavEndpoint
+from mavflow.message import MavMessageEnvelope
 
 
 class ApplicationPacketTests(unittest.TestCase):
@@ -60,6 +67,18 @@ class ApplicationPacketTests(unittest.TestCase):
             MavApplicationPacket("status", payload={"value": math.nan})
         with self.assertRaises(ValueError):
             MavApplicationPacket("status", payload={"value": object()})
+
+    def test_packet_rejects_invalid_identity_and_payload_shape(self) -> None:
+        for packet_type, packet_id, payload in (
+            ("  ", 1, {}),
+            ("status", 0, {}),
+            ("status", -1, {}),
+            ("status", 0x1_0000_0000, {}),
+            ("status", 1, []),
+        ):
+            with self.subTest(packet_type=packet_type, packet_id=packet_id, payload=payload):
+                with self.assertRaises(ValueError):
+                    MavApplicationPacket(packet_type, payload, packet_id=packet_id)  # type: ignore[arg-type]
 
 
 class ApplicationCodecTests(unittest.TestCase):
@@ -181,6 +200,87 @@ class ApplicationCodecTests(unittest.TestCase):
         with self.assertRaisesRegex(MavApplicationProtocolError, "sürümü"):
             MavApplicationCodec.decode_fragment(fragment)
 
+    def test_fragment_decoder_rejects_invalid_header_fields_and_lengths(self) -> None:
+        header = application_module._HEADER
+        fields = [application_module._MAGIC, application_module._VERSION, 0, 1, 0, 1, 1, 0]
+        valid = header.pack(*fields) + b"x"
+        invalid_fragments = [
+            b"short",
+            header.pack(b"BAD!", *fields[1:]) + b"x",
+            header.pack(fields[0], fields[1], 0, 0, *fields[4:]) + b"x",
+            header.pack(fields[0], fields[1], 0, 1, 0, 0, 1, 0) + b"x",
+            header.pack(
+                fields[0],
+                fields[1],
+                0,
+                1,
+                0,
+                application_module._MAX_FRAGMENT_COUNT + 1,
+                1,
+                0,
+            )
+            + b"x",
+            header.pack(fields[0], fields[1], 0, 1, 1, 1, 1, 0) + b"x",
+            header.pack(fields[0], fields[1], 0, 1, 0, 1, 2, 0) + b"x",
+            header.pack(
+                fields[0],
+                fields[1],
+                0,
+                1,
+                0,
+                1,
+                MavApplicationCodec.chunk_size + 1,
+                0,
+            ),
+        ]
+
+        self.assertEqual(MavApplicationCodec.decode_fragment(valid).chunk, b"x")
+        for fragment in invalid_fragments:
+            with self.subTest(fragment=fragment[: application_module._HEADER.size]):
+                with self.assertRaises(MavApplicationProtocolError):
+                    MavApplicationCodec.decode_fragment(fragment)
+
+    def test_packet_decoder_rejects_non_object_and_invalid_fields(self) -> None:
+        invalid_bodies = (
+            b"[]",
+            b'{"type":"status","payload":[]} ',
+            b'{"type":"","payload":{},"sent_at":1}',
+            b'{"type":"status","payload":{},"sent_at":"invalid"}',
+            b"\xff",
+        )
+        for body in invalid_bodies:
+            with self.subTest(body=body), self.assertRaises(MavApplicationProtocolError):
+                MavApplicationCodec.decode_packet(1, body)
+
+    def test_assembler_isolates_sources_and_discards_conflicting_packet_identity(self) -> None:
+        first_packet = MavApplicationPacket(
+            "data.large", {"text": "x" * 1_000}, packet_id=77, sent_at=1.0
+        )
+        second_packet = MavApplicationPacket(
+            "data.large", {"text": "y" * 1_000}, packet_id=77, sent_at=1.0
+        )
+        first_fragments = MavApplicationCodec.encode(first_packet)
+        second_fragments = MavApplicationCodec.encode(second_packet)
+
+        assembler = MavApplicationAssembler()
+        self.assertIsNone(assembler.accept(first_fragments[0], source_system=4))
+        self.assertIsNone(assembler.accept(second_fragments[0], source_system=5))
+        first_decoded = None
+        second_decoded = None
+        for fragment in first_fragments[1:]:
+            first_decoded = assembler.accept(fragment, source_system=4)
+        for fragment in second_fragments[1:]:
+            second_decoded = assembler.accept(fragment, source_system=5)
+        self.assertEqual(first_decoded.payload["text"], "x" * 1_000)
+        self.assertEqual(second_decoded.payload["text"], "y" * 1_000)
+
+        conflicting = MavApplicationAssembler()
+        self.assertIsNone(conflicting.accept(first_fragments[0], source_system=4))
+        with self.assertRaisesRegex(MavApplicationProtocolError, "uyuşmayan"):
+            conflicting.accept(second_fragments[0], source_system=4)
+        self.assertEqual(conflicting._inflight_bytes, 0)
+        self.assertFalse(conflicting._assemblies)
+
     def test_inflight_assembly_count_is_bounded(self) -> None:
         assembler = MavApplicationAssembler(max_inflight_assemblies=2)
         fragments = [
@@ -220,6 +320,138 @@ class ApplicationCodecTests(unittest.TestCase):
 
         self.assertEqual(len(assembler._completed), 2)
         self.assertNotIn((0, 0, 1), assembler._completed)
+
+
+class _ApplicationClient:
+    def __init__(self) -> None:
+        self.endpoint = MavEndpoint(source_system=42, source_component=3)
+        self.messages = EventBus[MavMessageEnvelope](
+            history=16,
+            routing_key=lambda envelope: envelope.message_type,
+        )
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    def call_mav(self, method_name: str, *args: object) -> None:
+        self.calls.append((method_name, args))
+
+    def publish_fragment(
+        self,
+        payload: bytes,
+        *,
+        source_system: int = 8,
+        source_component: int = 9,
+        target_network: int = 14,
+        message_type: int = 420,
+        target_system: int = 42,
+        target_component: int = 3,
+    ) -> None:
+        message = SimpleNamespace(
+            payload=list(payload),
+            target_network=target_network,
+            message_type=message_type,
+            target_system=target_system,
+            target_component=target_component,
+        )
+        self.messages.publish(
+            MavMessageEnvelope(
+                sequence=1,
+                message=message,
+                message_type="V2_EXTENSION",
+                source_system=source_system,
+                source_component=source_component,
+                message_id=123,
+                received_monotonic=time.monotonic(),
+            )
+        )
+
+
+class ApplicationChannelTests(unittest.TestCase):
+    def test_channel_filters_routes_and_clears_incomplete_assemblies(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(
+            client,  # type: ignore[arg-type]
+            network_id=14,
+            message_type=420,
+            source_systems=(8,),
+            source_components=(9,),
+        )
+        packets: list[MavApplicationPacket] = []
+        errors: list[Exception] = []
+        channel.packets.subscribe(packets.append)
+        channel.errors.subscribe(errors.append)
+        packet = MavApplicationPacket("data.large", {"text": "x" * 1_000}, packet_id=501)
+        fragments = MavApplicationCodec.encode(packet)
+
+        channel.start()
+        channel.start()
+        client.publish_fragment(fragments[0], source_system=7)
+        client.publish_fragment(fragments[0], target_network=13)
+        client.publish_fragment(fragments[0], target_system=99)
+        self.assertFalse(errors)
+        client.publish_fragment(fragments[0])
+        self.assertFalse(packets)
+        channel.stop()
+        self.assertFalse(channel.running)
+        channel.start()
+        for fragment in fragments[1:]:
+            client.publish_fragment(fragment)
+        self.assertFalse(packets)
+        client.publish_fragment(fragments[0])
+
+        self.assertEqual(len(packets), 1)
+        self.assertEqual(packets[0].packet_id, 501)
+        self.assertEqual(packets[0].payload["text"], "x" * 1_000)
+        channel.stop()
+
+    def test_channel_publishes_protocol_errors_for_matching_frames(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(client, network_id=14, message_type=420)
+        errors: list[Exception] = []
+        channel.errors.subscribe(errors.append)
+        channel.start()
+        client.publish_fragment(b"bad frame")
+
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], MavApplicationProtocolError)
+        channel.stop()
+
+    def test_channel_send_fragments_and_pads_mavlink_extension_payloads(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(
+            client,  # type: ignore[arg-type]
+            network_id=14,
+            message_type=420,
+            target_system=5,
+            target_component=6,
+        )
+        packet = channel.send(
+            "Data.Large",
+            {"text": "x" * 1_000},
+            packet_id=78,
+            target_system=8,
+            target_component=9,
+            expects_response=True,
+        )
+        fragments = MavApplicationCodec.encode(packet)
+
+        self.assertEqual(packet.packet_id, 78)
+        self.assertTrue(packet.expects_response)
+        self.assertEqual(len(client.calls), len(fragments))
+        for (method_name, args), fragment in zip(client.calls, fragments, strict=True):
+            padded = cast(list[int], args[4])
+            self.assertEqual(method_name, "v2_extension_send")
+            self.assertEqual(args[:4], (14, 8, 9, 420))
+            self.assertEqual(len(padded), 249)
+            self.assertEqual(padded[: len(fragment)], list(fragment))
+
+    def test_channel_rejects_invalid_destination_and_protocol_configuration(self) -> None:
+        client = _ApplicationClient()
+        with self.assertRaises(ValueError):
+            MavApplicationChannel(client, network_id=256)  # type: ignore[arg-type]
+        channel = MavApplicationChannel(client)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            channel.send("status", target_system=256)
+        self.assertFalse(client.calls)
 
 
 if __name__ == "__main__":

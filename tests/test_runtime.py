@@ -73,6 +73,7 @@ class FakePeer:
         self.errors = EventBus[Exception]()
         self.alive = True
         self.sent: list[tuple[str, Any]] = []
+        self.requests: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
 
     def start(self) -> None:
         self.calls.append("peer:start")
@@ -85,6 +86,7 @@ class FakePeer:
         return MavApplicationPacket(packet_type, payload or {})
 
     def request(self, *_args: Any, **_kwargs: Any) -> str:
+        self.requests.append((_args, _kwargs))
         return "response"
 
 
@@ -146,6 +148,69 @@ class MavRuntimeTests(unittest.TestCase):
             ],
         )
         runtime.close()
+
+    def test_start_failure_rolls_back_components_in_reverse_order(self) -> None:
+        calls: list[str] = []
+
+        class FailingStartDispatcher(FakeDispatcher):
+            def start(self) -> None:
+                self.calls.append("dispatcher:start")
+                raise OSError("dispatcher startup failed")
+
+        runtime = MavRuntime(
+            client=FakeClient(calls),  # type: ignore[arg-type]
+            peer=FakePeer(calls),  # type: ignore[arg-type]
+            dispatcher=FailingStartDispatcher(calls),  # type: ignore[arg-type]
+        )
+
+        with self.assertRaisesRegex(OSError, "dispatcher startup failed"):
+            runtime.start()
+
+        self.assertEqual(
+            calls,
+            [
+                "client:start",
+                "peer:start",
+                "dispatcher:start",
+                "peer:stop",
+                "client:stop",
+            ],
+        )
+        self.assertFalse(runtime.running)
+        runtime.close()
+
+    def test_request_requires_and_forwards_to_application_peer(self) -> None:
+        calls: list[str] = []
+        peer = FakePeer(calls)
+        runtime = MavRuntime(
+            client=FakeClient(calls),  # type: ignore[arg-type]
+            peer=peer,  # type: ignore[arg-type]
+        )
+
+        self.assertEqual(
+            runtime.request(
+                "camera.capture",
+                {"mode": "still"},
+                response_types="system.ack",
+                timeout=1.5,
+            ),
+            "response",
+        )
+        self.assertEqual(
+            peer.requests,
+            [
+                (
+                    ("camera.capture", {"mode": "still"}),
+                    {"response_types": "system.ack", "timeout": 1.5},
+                )
+            ],
+        )
+        runtime.close()
+
+        no_peer_runtime = MavRuntime(client=FakeClient([]))  # type: ignore[arg-type]
+        with self.assertRaisesRegex(RuntimeError, "not configured"):
+            no_peer_runtime.request("camera.capture")
+        no_peer_runtime.close()
 
     def test_simple_message_and_application_facade(self) -> None:
         calls: list[str] = []

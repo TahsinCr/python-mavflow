@@ -144,6 +144,7 @@ class _ChannelStub:
         self.packets = EventBus[MavApplicationPacket]()
         self.errors = EventBus[Exception]()
         self.sent: list[MavApplicationPacket] = []
+        self.sent_targets: list[dict[str, Any]] = []
         self.started = False
 
     def start(self) -> None:
@@ -168,6 +169,7 @@ class _ChannelStub:
             expects_response=expects_response,
         )
         self.sent.append(packet)
+        self.sent_targets.append(_targets)
         return packet
 
 
@@ -287,6 +289,103 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertFalse(requester.is_alive())
         self.assertEqual(responses[0].response.payload["accepted"], True)
 
+    def test_request_ignores_matching_id_with_unexpected_response_type(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel)
+        peer.start()
+        sent = threading.Event()
+        requests: list[MavApplicationPacket] = []
+        responses: list[Any] = []
+        errors: list[Exception] = []
+
+        def request() -> None:
+            try:
+                responses.append(
+                    peer.request(
+                        "camera.capture",
+                        response_types="system.ack",
+                        timeout=1.0,
+                        on_sent=lambda packet: (requests.append(packet), sent.set()),
+                    )
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        requester = threading.Thread(target=request)
+        requester.start()
+        self.assertTrue(sent.wait(1.0))
+        request_id = requests[0].packet_id
+        channel.packets.publish(MavApplicationPacket("system.error", {"request_id": request_id}))
+        self.assertTrue(requester.is_alive())
+        channel.packets.publish(
+            MavApplicationPacket("system.ack", {"request_id": request_id, "accepted": True})
+        )
+        requester.join(1.0)
+        peer.stop()
+
+        self.assertFalse(requester.is_alive())
+        self.assertFalse(errors)
+        self.assertTrue(responses[0].response.payload["accepted"])
+
+    def test_peer_answers_ping_and_records_probe_round_trip(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel)
+        peer.start()
+        channel.packets.publish(
+            MavApplicationPacket(
+                "system.ping",
+                {"health": "ready"},
+                packet_id=303,
+                source_system=21,
+                source_component=5,
+            )
+        )
+
+        pong_index = next(
+            index
+            for index, packet in enumerate(channel.sent)
+            if packet.packet_type == "system.pong"
+        )
+        pong = channel.sent[pong_index]
+        self.assertEqual(pong.payload["request_id"], 303)
+        self.assertEqual(pong.payload["role"], "onboard")
+        self.assertEqual(
+            channel.sent_targets[pong_index],
+            {"target_system": 21, "target_component": 5},
+        )
+
+        probe = peer.probe()
+        self.assertEqual(probe.packet_type, "system.ping")
+        channel.packets.publish(
+            MavApplicationPacket("system.pong", {"request_id": probe.packet_id})
+        )
+        round_trip_ms = peer.state.round_trip_ms
+        self.assertIsNotNone(round_trip_ms)
+        assert round_trip_ms is not None
+        self.assertGreaterEqual(round_trip_ms, 0.0)
+        self.assertNotIn(probe.packet_id, peer._probes)
+        peer.stop()
+
+    def test_request_validation_and_channel_start_failure_leave_peer_stopped(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel)
+        with self.assertRaises(ConnectionError):
+            peer.request("camera.capture", response_types="system.ack", timeout=0.1)
+        with self.assertRaises(ValueError):
+            peer.request("camera.capture", response_types="system.ack", timeout=0)
+
+        class FailingChannel(_ChannelStub):
+            def start(self) -> None:
+                raise OSError("channel start failed")
+
+        failing_channel = FailingChannel()
+        failed_peer = self._peer(failing_channel)
+        with self.assertRaisesRegex(OSError, "channel start failed"):
+            failed_peer.start()
+        self.assertFalse(failed_peer.running)
+        failing_channel.packets.publish(MavApplicationPacket("system.heartbeat"))
+        self.assertEqual(failed_peer.state.packets_in, 0)
+
     def test_request_timeout_and_liveness_expiry(self) -> None:
         channel = _ChannelStub()
         peer = self._peer(channel)
@@ -360,6 +459,8 @@ class DispatcherLifecycleTests(unittest.TestCase):
         )
         entered = threading.Event()
         release = threading.Event()
+        errors: list[Exception] = []
+        dispatcher.errors.subscribe(errors.append)
 
         def handler(_packet: MavApplicationPacket) -> dict[str, bool]:
             entered.set()
@@ -388,6 +489,10 @@ class DispatcherLifecycleTests(unittest.TestCase):
         self.assertIn(103, response_ids)
         self.assertNotIn(101, response_ids)
         self.assertNotIn(102, response_ids)
+        busy_response = next(payload for _, payload in peer.sent if payload["request_id"] == 103)
+        self.assertEqual(busy_response["error_type"], "DispatcherBusy")
+        self.assertEqual(len(errors), 1)
+        self.assertRegex(str(errors[0]), "queue is full")
 
         dispatcher.start()
         handled = threading.Event()

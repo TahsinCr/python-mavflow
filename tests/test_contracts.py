@@ -12,6 +12,7 @@ from mavflow.connection import MavConnection
 from mavflow.endpoint import MavEndpoint
 from mavflow.message import MavMessageEnvelope
 from mavflow.remote_log import (
+    REMOTE_LOG_MAX_BATCH_RECORDS,
     REMOTE_LOG_MAX_DETAILS_BYTES,
     MavRemoteLogBatch,
     MavRemoteLogLevel,
@@ -321,6 +322,51 @@ class RemoteLogTests(unittest.TestCase):
             MavRemoteLogBatch("session-001", (self._record(2), self._record(1)))
         with self.assertRaisesRegex(ValueError, "protocol version"):
             MavRemoteLogBatch.from_payload({"version": 99, "session": "session-001", "records": []})
+
+    def test_remote_log_payload_shapes_and_optional_text_are_normalized(self) -> None:
+        record = MavRemoteLogRecord.from_payload(
+            {
+                "seq": 1,
+                "source": " flight ",
+                "action": " Started ",
+                "message": " Ready ",
+                "level": "INFO",
+                "at": 1.0,
+                "details": {},
+                "device_id": "  ",
+                "correlation_id": " job-7 ",
+            }
+        )
+
+        self.assertEqual(
+            (record.source, record.action, record.message), ("FLIGHT", "started", "Ready")
+        )
+        self.assertIsNone(record.device_id)
+        self.assertEqual(record.correlation_id, "job-7")
+        for payload in ([], {"details": []}, {"level": "not-a-level"}):
+            with self.subTest(payload=payload), self.assertRaises(ValueError):
+                MavRemoteLogRecord.from_payload(payload)  # type: ignore[arg-type]
+        with self.assertRaises(ValueError):
+            MavRemoteLogBatch.from_payload(
+                {"version": 1, "session": "session-001", "records": "bad"}
+            )
+
+    def test_remote_log_batch_enforces_count_timestamp_and_encoded_size_limits(self) -> None:
+        with self.assertRaisesRegex(ValueError, "1.."):
+            MavRemoteLogBatch("session-001", ())
+        too_many = tuple(
+            self._record(sequence) for sequence in range(1, REMOTE_LOG_MAX_BATCH_RECORDS + 2)
+        )
+        with self.assertRaisesRegex(ValueError, "records"):
+            MavRemoteLogBatch("session-001", too_many)
+        with self.assertRaisesRegex(ValueError, "timestamp"):
+            MavRemoteLogBatch("session-001", (self._record(),), created_at=math.nan)
+
+        oversized = tuple(
+            self._record(sequence, details={"text": "x" * 2_500}) for sequence in range(1, 6)
+        )
+        with self.assertRaisesRegex(ValueError, "encoded bytes"):
+            MavRemoteLogBatch("session-001", oversized)
 
 
 if __name__ == "__main__":
