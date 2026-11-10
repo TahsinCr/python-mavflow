@@ -18,6 +18,20 @@ These commands create fresh files in the project root. Pick new names for later
 runs; keep the reference suites in this directory unchanged unless you intend
 to replace them after reviewing the new measurements.
 
+Current reference workloads:
+
+| Suite | Workload |
+| --- | --- |
+| `router.json` | 1,000 messages, 1 subscriber, 100% HEARTBEAT matches. |
+| `router-filtered.json` | 1,000 messages, 10 subscribers, 10% HEARTBEAT matches. |
+| `codec.json` | 2,048-byte application packet encode and reassembly. |
+
+The refreshed router benchmark now calls MAVLink `get_seq()` and measures the
+sequence-quality path. The previous router suite omitted that path, so its
+timings are not a directly comparable before/after measurement. The new full
+pyperf runs also reported host jitter; treat these files as reproducible
+workload records, not as evidence of a performance gain.
+
 The router workload times delivery through Mavflow's single-reader router from a
 preloaded in-memory queue; queue construction, router startup, and shutdown are
 outside its timed region. It does not measure a serial device, UDP stack, or
