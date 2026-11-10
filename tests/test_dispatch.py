@@ -19,6 +19,7 @@ class _DispatchPeer:
     def __init__(self) -> None:
         self.packets = EventBus[MavApplicationPacket]()
         self.sent: list[tuple[str, dict[str, Any], dict[str, int]]] = []
+        self.send_thread_ids: list[int] = []
         self.send_error: Exception | None = None
         self.response_sent = threading.Event()
 
@@ -35,6 +36,7 @@ class _DispatchPeer:
         if self.send_error is not None:
             raise self.send_error
         self.sent.append((packet_type, dict(payload), targets))
+        self.send_thread_ids.append(threading.get_ident())
         self.response_sent.set()
 
 
@@ -88,6 +90,7 @@ class DispatcherContractTests(unittest.TestCase):
         dispatcher.start()
         self.addCleanup(dispatcher.stop)
         self.assertFalse(dispatcher.dispatch(request))
+        self.assertTrue(peer.response_sent.wait(1.0))
 
         self.assertEqual(unhandled, [request])
         self.assertEqual(len(peer.sent), 1)
@@ -96,6 +99,7 @@ class DispatcherContractTests(unittest.TestCase):
         self.assertEqual(payload["request_id"], 50)
         self.assertEqual(payload["error_type"], "UnsupportedPacket")
         self.assertEqual(targets, {"target_system": 12, "target_component": 4})
+        self.assertNotEqual(peer.send_thread_ids[0], threading.get_ident())
 
     def test_handler_mapping_is_returned_and_correlated_in_response(self) -> None:
         peer = _DispatchPeer()
@@ -280,7 +284,13 @@ class DispatcherContractTests(unittest.TestCase):
         peer.send_error = OSError("transport failed")
         dispatcher = MavApplicationDispatcher(peer)  # type: ignore[arg-type]
         errors: list[Exception] = []
-        dispatcher.errors.subscribe(errors.append)
+        error_received = threading.Event()
+
+        def receive_error(error: Exception) -> None:
+            errors.append(error)
+            error_received.set()
+
+        dispatcher.errors.subscribe(receive_error)
         dispatcher.start()
         self.addCleanup(dispatcher.stop)
 
@@ -289,6 +299,7 @@ class DispatcherContractTests(unittest.TestCase):
                 MavApplicationPacket("camera.unknown", packet_id=90, expects_response=True)
             )
         )
+        self.assertTrue(error_received.wait(1.0))
         self.assertEqual(errors, [peer.send_error])
 
 

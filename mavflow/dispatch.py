@@ -222,13 +222,14 @@ class MavApplicationDispatcher:
         if handler is None:
             self.unhandled.publish(packet)
             if packet.expects_response:
-                self._respond(
-                    packet,
-                    MavApplicationResult.failure(
-                        f"Unsupported application packet type: {packet.packet_type}",
-                        {"error_type": "UnsupportedPacket"},
-                    ),
+                result = MavApplicationResult.failure(
+                    f"Unsupported application packet type: {packet.packet_type}",
+                    {"error_type": "UnsupportedPacket"},
                 )
+                try:
+                    work_pool.submit(self._respond, packet, result)
+                except Exception as exc:
+                    self.errors.publish(exc)
             return False
         try:
             work_pool.submit(self._execute, packet, handler, generation)
@@ -236,14 +237,8 @@ class MavApplicationDispatcher:
             busy = isinstance(exc, RuntimeError) and self._is_generation_active(generation)
             error = RuntimeError("MAVLink application dispatcher queue is full") if busy else exc
             self.errors.publish(error)
-            if packet.expects_response and self._is_generation_active(generation):
-                self._respond(
-                    packet,
-                    MavApplicationResult.failure(
-                        str(error),
-                        {"error_type": "DispatcherBusy" if busy else exc.__class__.__name__},
-                    ),
-                )
+            # Do not send a saturation response on the router thread. The
+            # caller observes the bounded-pool error and its request deadline.
             return False
         return True
 

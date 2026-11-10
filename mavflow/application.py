@@ -29,6 +29,7 @@ _CHUNK_SIZE = V2_EXTENSION_PAYLOAD_SIZE - _HEADER.size
 _MAX_FRAGMENT_COUNT = 72
 _MAX_PACKET_BYTES = _CHUNK_SIZE * _MAX_FRAGMENT_COUNT
 _MAX_PACKET_TYPE_LENGTH = 96
+_MAX_JSON_DEPTH = 64
 
 
 class MavApplicationProtocolError(ValueError):
@@ -55,6 +56,59 @@ def _normalize_source_ids(
     if any(not 0 <= value <= 255 for value in normalized):
         raise ValueError(f"{name} 0..255 aralığında olmalı")
     return normalized
+
+
+def _normalize_allowed_sources(
+    values: tuple[tuple[int, int], ...] | None,
+) -> frozenset[tuple[int, int]] | None:
+    if values is None:
+        return None
+    normalized: set[tuple[int, int]] = set()
+    for pair in values:
+        if not isinstance(pair, tuple) or len(pair) != 2:
+            raise ValueError("allowed_sources her biri (system, component) olan çiftler içermeli")
+        system = _normalize_source_id(pair[0], "allowed_sources system")
+        component = _normalize_source_id(pair[1], "allowed_sources component")
+        if system is None or component is None:
+            raise ValueError("allowed_sources kimlik çiftleri None içeremez")
+        normalized.add((system, component))
+    return frozenset(normalized)
+
+
+def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"JSON nesnesinde yinelenen anahtar: {key}")
+        result[key] = value
+    return result
+
+
+def _validate_json_depth(body: str) -> None:
+    depth = 0
+    in_string = False
+    escaped = False
+    for character in body:
+        if in_string:
+            if escaped:
+                escaped = False
+            elif character == "\\":
+                escaped = True
+            elif character == '"':
+                in_string = False
+            continue
+        if character == '"':
+            in_string = True
+        elif character in "{[":
+            depth += 1
+            if depth > _MAX_JSON_DEPTH:
+                raise MavApplicationProtocolError(
+                    f"Uygulama JSON iç içe geçme sınırını aştı: {_MAX_JSON_DEPTH}"
+                )
+        elif character in "}]":
+            depth -= 1
+            if depth < 0:
+                raise MavApplicationProtocolError("Uygulama JSON iç içe geçmesi geçersiz")
 
 
 def _raise_invalid_json_constant(value: str) -> None:
@@ -236,8 +290,15 @@ class MavApplicationCodec:
             raise MavApplicationProtocolError("Uygulama paket kimliği geçersiz")
         if not 1 <= count <= _MAX_FRAGMENT_COUNT or index >= count:
             raise MavApplicationProtocolError("Uygulama fragment sırası geçersiz")
-        if chunk_length > cls.chunk_size or _HEADER.size + chunk_length > len(raw):
+        if (
+            chunk_length == 0
+            or chunk_length > cls.chunk_size
+            or _HEADER.size + chunk_length > len(raw)
+            or (index < count - 1 and chunk_length != cls.chunk_size)
+        ):
             raise MavApplicationProtocolError("Uygulama fragment uzunluğu geçersiz")
+        if any(raw[_HEADER.size + chunk_length :]):
+            raise MavApplicationProtocolError("Uygulama fragment padding alanı sıfır olmalı")
         return _Fragment(
             packet_id,
             index,
@@ -255,11 +316,16 @@ class MavApplicationCodec:
         source_component: int | None = None,
     ) -> MavApplicationPacket:
         try:
+            json_body = body.decode("utf-8")
+            _validate_json_depth(json_body)
             decoded = json.loads(
-                body.decode("utf-8"),
+                json_body,
                 parse_constant=lambda value: _raise_invalid_json_constant(value),
+                object_pairs_hook=_reject_duplicate_json_keys,
             )
-        except (UnicodeDecodeError, json.JSONDecodeError, ValueError) as exc:
+        except MavApplicationProtocolError:
+            raise
+        except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:
             raise MavApplicationProtocolError(f"Uygulama paket gövdesi çözülemedi: {exc}") from exc
         if not isinstance(decoded, dict):
             raise MavApplicationProtocolError("Uygulama paket gövdesi nesne olmalı")
@@ -291,12 +357,17 @@ class MavApplicationCodec:
                 source_component,
                 reply,
             )
-        except (TypeError, ValueError, OverflowError) as exc:
+        except (TypeError, ValueError, OverflowError, RecursionError) as exc:
             raise MavApplicationProtocolError(f"Uygulama paket gövdesi geçersiz: {exc}") from exc
 
 
 class MavApplicationAssembler:
-    """Reassemble out-of-order fragments into one packet per source identity."""
+    """Reassemble packets and suppress recent duplicate packet IDs per source.
+
+    Duplicate suppression is in-memory, bounded, and lasts at most
+    ``fragment_timeout``; cache pressure can evict entries sooner. It is not
+    durable request deduplication or an exactly-once delivery guarantee.
+    """
 
     def __init__(
         self,
@@ -478,6 +549,7 @@ class MavApplicationChannel:
         local_component: int | None = None,
         source_systems: int | tuple[int, ...] | None = None,
         source_components: int | tuple[int, ...] | None = None,
+        allowed_sources: tuple[tuple[int, int], ...] | None = None,
         fragment_timeout: float = 10.0,
         max_inflight_assemblies: int = 256,
         max_inflight_bytes: int = _MAX_PACKET_BYTES * 4,
@@ -499,12 +571,8 @@ class MavApplicationChannel:
         self.message_type = int(message_type)
         self.target_system = int(target_system)
         self.target_component = int(target_component)
-        self.local_system = (
-            client.endpoint.source_system if local_system is None else int(local_system)
-        )
-        self.local_component = (
-            client.endpoint.source_component if local_component is None else int(local_component)
-        )
+        self._local_system_override = _normalize_source_id(local_system, "local_system")
+        self._local_component_override = _normalize_source_id(local_component, "local_component")
         self.packets = EventBus[MavApplicationPacket]()
         self.errors = EventBus[Exception]()
         self._assembler = MavApplicationAssembler(
@@ -517,30 +585,51 @@ class MavApplicationChannel:
         )
         self._source_systems = _normalize_source_ids(source_systems, "source_systems")
         self._source_components = _normalize_source_ids(source_components, "source_components")
+        self._allowed_sources = _normalize_allowed_sources(allowed_sources)
         self._subscription: Subscription | None = None
+        self._running = False
         self._lock = threading.RLock()
+
+    @property
+    def local_system(self) -> int:
+        if self._local_system_override is not None:
+            return self._local_system_override
+        return self._client.endpoint.source_system
+
+    @property
+    def local_component(self) -> int:
+        if self._local_component_override is not None:
+            return self._local_component_override
+        return self._client.endpoint.source_component
 
     @property
     def running(self) -> bool:
         with self._lock:
-            return self._subscription is not None
+            return self._running
 
     def start(self) -> None:
         with self._lock:
-            if self._subscription is not None:
+            if self._running:
                 return
-            self._subscription = self._client.messages.subscribe(
-                self._on_message,
-                event_filter=EventFilter(predicate=self._matches_channel),
-            )
+            self._assembler.clear()
+            self._running = True
+            try:
+                self._subscription = self._client.messages.subscribe(
+                    self._on_message,
+                    event_filter=EventFilter(predicate=self._matches_channel),
+                )
+            except Exception:
+                self._running = False
+                raise
 
     def stop(self) -> None:
         with self._lock:
+            self._running = False
             subscription = self._subscription
             self._subscription = None
-        if subscription is not None:
-            subscription.cancel()
-        self._assembler.clear()
+            if subscription is not None:
+                subscription.cancel()
+            self._assembler.clear()
 
     def send(
         self,
@@ -589,6 +678,15 @@ class MavApplicationChannel:
                 and envelope.source_component not in self._source_components
             ):
                 return False
+            if (
+                self._allowed_sources is not None
+                and (
+                    envelope.source_system or 0,
+                    envelope.source_component or 0,
+                )
+                not in self._allowed_sources
+            ):
+                return False
             if int(message.target_network) != self.network_id:
                 return False
             if int(message.message_type) != self.message_type:
@@ -600,16 +698,19 @@ class MavApplicationChannel:
             return False
 
     def _on_message(self, envelope: MavMessageEnvelope) -> None:
-        message = envelope.message
-        try:
-            packet = self._assembler.accept(
-                message.payload,
-                source_system=envelope.source_system,
-                source_component=envelope.source_component,
-            )
-        except Exception as exc:
-            self.errors.publish(exc)
-            return
-        if packet is not None:
-            for error in self.packets.publish(packet).errors:
+        with self._lock:
+            if not self._running:
+                return
+            message = envelope.message
+            try:
+                packet = self._assembler.accept(
+                    message.payload,
+                    source_system=envelope.source_system,
+                    source_component=envelope.source_component,
+                )
+            except Exception as exc:
+                errors = (exc,)
+            else:
+                errors = self.packets.publish(packet).errors if packet is not None else ()
+            for error in errors:
                 self.errors.publish(error)

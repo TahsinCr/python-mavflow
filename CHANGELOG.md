@@ -6,6 +6,11 @@ All notable changes to Mavflow are documented here.
 
 ### Added
 
+- Support explicit system/component source pairs through application channel
+  `allowed_sources` while preserving the independent source allowlists.
+- Document best-effort request delivery, in-memory duplicate suppression,
+  payload wire-time limits, callback lifecycle restrictions, and dispatcher
+  saturation behavior in both README languages.
 - Measure router callback fan-out across subscriber counts and 0%, 10%, 50%,
   and 100% message-filter match ratios in the pyperf router benchmark; include
   the MAVLink sequence path in benchmark messages.
@@ -18,6 +23,9 @@ All notable changes to Mavflow are documented here.
 
 ### Changed
 
+- Submit automatic responses for unknown application requests to EventFlow's
+  bounded dispatcher pool; pool saturation now reports an error and leaves the
+  caller to its request deadline instead of sending on the router thread.
 - Route envelopes from the extracted [Vehicle Autonomy Core MAVLink source](https://github.com/TahsinCr/vehicle-autonomy-core/tree/main/mavlink)
   through EventFlow's `EventBus` and expose
   EventFlow's native `EventEngine`, `EventFilter`, `EventHistory`, and
@@ -83,6 +91,15 @@ All notable changes to Mavflow are documented here.
   measured router interval accurately.
 - Preflight the complete application response, including correlation metadata,
   before sending it.
+- Keep application channel local IDs aligned with endpoint reconfiguration,
+  serialize packet-ID allocation with pending request/probe registration, and
+  wait for in-flight channel callbacks during stop.
+- Reject runtime stop/close calls from the router receive callback before
+  tearing down any owned component.
+- Send peer pongs and automatic dispatcher replies through existing worker
+  threads rather than performing transport I/O on the router callback path.
+- Reject duplicate JSON object keys, excessive nesting, malformed fragment
+  lengths, and non-zero fragment padding before application dispatch.
 - Refresh pyperf router and codec result files against the current source.
 - Document that pymavlink condition expressions must come from trusted code,
   and that `is_connected` reports an open raw connection rather than peer health.

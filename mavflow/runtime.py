@@ -48,9 +48,20 @@ class MavRuntime:
         channel_options: Mapping[str, Any] | None = None,
         peer_options: Mapping[str, Any] | None = None,
     ) -> None:
-        if client is not None and endpoint is not None and client.endpoint != endpoint:
+        if peer is not None:
+            peer_channel = getattr(peer, "_channel", None)
+            if peer_channel is not None:
+                if channel is None:
+                    channel = peer_channel
+                elif channel is not peer_channel:
+                    raise ValueError("MAVLink runtime peer and channel do not match")
+        if client is None:
+            client = MavClient(endpoint or MavEndpoint()) if channel is None else channel._client
+        if endpoint is not None and client.endpoint != endpoint:
             raise ValueError("MAVLink runtime endpoint and client endpoint do not match")
-        self.client = client or MavClient(endpoint or MavEndpoint())
+        if channel is not None and getattr(channel, "_client", client) is not client:
+            raise ValueError("MAVLink runtime channel uses a different client")
+        self.client = client
         self.connection = self.client.connection
         self.router = self.client.router
 
@@ -59,6 +70,8 @@ class MavRuntime:
             raise ValueError("A custom application channel requires a role or peer")
         if dispatcher is not None and peer is None:
             raise ValueError("A custom dispatcher requires an application peer")
+        if dispatcher is not None and getattr(dispatcher, "_peer", peer) is not peer:
+            raise ValueError("MAVLink runtime dispatcher and peer do not match")
 
         if peer is None and role:
             peer_config = dict(peer_options or {})
@@ -194,6 +207,8 @@ class MavRuntime:
         """Stop every owned layer in reverse order and preserve all errors."""
 
         with self._lifecycle_lock:
+            if getattr(self.router, "_thread", None) is threading.current_thread():
+                raise RuntimeError("MAVLink runtime cannot stop from its router receive thread")
             with self._lock:
                 if not self._running and not self._cleanup_pending:
                     return

@@ -5,6 +5,7 @@ import threading
 import time
 import unittest
 from typing import Any
+from unittest.mock import patch
 
 from eventflow import AsyncEventQueue, EventBus, EventFilter
 
@@ -91,6 +92,34 @@ class RouterLifecycleTests(unittest.TestCase):
         self.assertEqual(envelope.message.value, 9)
         self.assertEqual(connection.start_count, 2)
         self.assertEqual(connection.stop_count, 2)
+        self.assertFalse(router.running)
+
+    def test_router_rejects_stop_from_its_synchronous_message_callback(self) -> None:
+        connection = _RestartableConnection()
+        router = MavMessageRouter(
+            connection,  # type: ignore[arg-type]
+            poll_timeout=0.01,
+            stop_timeout=0.2,
+        )
+        callback_finished = threading.Event()
+        callback_errors: list[Exception] = []
+
+        def stop_from_reader(_envelope: Any) -> None:
+            try:
+                router.stop()
+            except RuntimeError as exc:
+                callback_errors.append(exc)
+            finally:
+                callback_finished.set()
+
+        router.messages.subscribe(stop_from_reader)
+        router.start()
+        connection.inbox.put(_Message("HEARTBEAT", 10))
+        self.assertTrue(callback_finished.wait(1.0))
+        router.stop()
+
+        self.assertEqual(len(callback_errors), 1)
+        self.assertRegex(str(callback_errors[0]), "receive thread")
         self.assertFalse(router.running)
 
     def test_router_keeps_connection_open_when_receive_thread_is_stuck(self) -> None:
@@ -208,6 +237,8 @@ class _ChannelStub:
         self.errors = EventBus[Exception]()
         self.sent: list[MavApplicationPacket] = []
         self.sent_targets: list[dict[str, Any]] = []
+        self.sent_thread_ids: list[int] = []
+        self.sent_event = threading.Event()
         self.started = False
 
     def start(self) -> None:
@@ -233,6 +264,8 @@ class _ChannelStub:
         )
         self.sent.append(packet)
         self.sent_targets.append(_targets)
+        self.sent_thread_ids.append(threading.get_ident())
+        self.sent_event.set()
         return packet
 
 
@@ -541,6 +574,7 @@ class PeerLifecycleTests(unittest.TestCase):
         channel = _ChannelStub()
         peer = self._peer(channel)
         peer.start()
+        channel.sent_event.clear()
         channel.packets.publish(
             MavApplicationPacket(
                 "system.ping",
@@ -550,6 +584,8 @@ class PeerLifecycleTests(unittest.TestCase):
                 source_component=5,
             )
         )
+
+        self.assertTrue(channel.sent_event.wait(1.0))
 
         pong_index = next(
             index
@@ -563,6 +599,8 @@ class PeerLifecycleTests(unittest.TestCase):
             channel.sent_targets[pong_index],
             {"target_system": 21, "target_component": 5},
         )
+        self.assertNotEqual(channel.sent_thread_ids[pong_index], threading.get_ident())
+        self.assertEqual(channel.sent_thread_ids[pong_index], peer._monitor_thread.ident)
 
         probe = peer.probe()
         self.assertEqual(probe.packet_type, "system.ping")
@@ -575,6 +613,66 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertGreaterEqual(round_trip_ms, 0.0)
         self.assertNotIn(probe.packet_id, peer._probes)
         peer.stop()
+
+    def test_request_and_probe_packet_ids_are_reserved_atomically(self) -> None:
+        first_send_entered = threading.Event()
+        release_first_send = threading.Event()
+        first_sent = threading.Event()
+        second_sent = threading.Event()
+
+        class FirstSendBlocks(_ChannelStub):
+            def send(self, packet_type: str, *args: Any, **kwargs: Any) -> MavApplicationPacket:
+                if packet_type == "camera.first":
+                    first_send_entered.set()
+                    if not release_first_send.wait(1.0):
+                        raise TimeoutError("test did not release first request send")
+                return super().send(packet_type, *args, **kwargs)
+
+        channel = FirstSendBlocks()
+        peer = self._peer(channel)
+        peer.start()
+        responses: list[Any] = []
+        errors: list[Exception] = []
+
+        def make_request(packet_type: str, sent: threading.Event) -> None:
+            try:
+                responses.append(
+                    peer.request(
+                        packet_type,
+                        response_types="system.ack",
+                        timeout=1.0,
+                        on_sent=lambda _packet: sent.set(),
+                    )
+                )
+            except Exception as exc:
+                errors.append(exc)
+
+        with patch("mavflow.peer.secrets.randbits", side_effect=(77, 77, 78, 77, 78, 79)):
+            first = threading.Thread(target=make_request, args=("camera.first", first_sent))
+            second = threading.Thread(target=make_request, args=("camera.second", second_sent))
+            first.start()
+            self.assertTrue(first_send_entered.wait(1.0))
+            second.start()
+            self.assertTrue(second_sent.wait(1.0))
+            probe = peer.probe()
+            release_first_send.set()
+            self.assertTrue(first_sent.wait(1.0))
+            self.assertEqual(len({77, 78, probe.packet_id}), 3)
+            channel.packets.publish(
+                MavApplicationPacket("system.ack", {"request_id": 77}, packet_id=501)
+            )
+            channel.packets.publish(
+                MavApplicationPacket("system.ack", {"request_id": 78}, packet_id=502)
+            )
+            first.join(1.0)
+            second.join(1.0)
+        peer.stop()
+
+        self.assertFalse(first.is_alive())
+        self.assertFalse(second.is_alive())
+        self.assertFalse(errors)
+        self.assertEqual(len(responses), 2)
+        self.assertEqual({response.request.packet_id for response in responses}, {77, 78})
 
     def test_request_validation_and_channel_start_failure_leave_peer_stopped(self) -> None:
         channel = _ChannelStub()
@@ -813,11 +911,9 @@ class DispatcherLifecycleTests(unittest.TestCase):
 
         self.assertFalse(stopper.is_alive())
         response_ids = [payload["request_id"] for _, payload in peer.sent]
-        self.assertIn(103, response_ids)
+        self.assertNotIn(103, response_ids)
         self.assertNotIn(101, response_ids)
         self.assertNotIn(102, response_ids)
-        busy_response = next(payload for _, payload in peer.sent if payload["request_id"] == 103)
-        self.assertEqual(busy_response["error_type"], "DispatcherBusy")
         self.assertEqual(len(errors), 1)
         self.assertRegex(str(errors[0]), "queue is full")
 

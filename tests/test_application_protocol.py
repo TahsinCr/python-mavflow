@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import math
+import threading
 import time
 import unittest
 from collections.abc import Mapping
 from types import SimpleNamespace
 from typing import cast
+from unittest.mock import patch
 
 from eventflow import EventBus
 
@@ -197,6 +199,28 @@ class ApplicationCodecTests(unittest.TestCase):
                 b'{"type":"status","payload":{"value":NaN},"sent_at":1}',
             )
 
+    def test_json_decoder_rejects_duplicate_keys_invalid_utf8_and_excessive_depth(self) -> None:
+        malformed_bodies = (
+            b'{"type":"status","payload":{},"sent_at":1,"sent_at":2}',
+            b"\xff",
+            b'{"type":"status","payload":' + b"[" * 65 + b"0" + b"]" * 65 + b',"sent_at":1}',
+            b"]" + b'{"type":"status","payload":{}}',
+        )
+        for body in malformed_bodies:
+            with self.subTest(body=body[:48]), self.assertRaises(MavApplicationProtocolError):
+                MavApplicationCodec.decode_packet(1, body)
+
+    def test_json_depth_scanner_ignores_brackets_inside_escaped_strings(self) -> None:
+        text = '[]{}\\"' * 80
+        packet = MavApplicationPacket("status.update", {"text": text}, packet_id=902)
+        assembler = MavApplicationAssembler()
+        decoded = None
+        for fragment in MavApplicationCodec.encode(packet):
+            decoded = assembler.accept(fragment)
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.payload["text"], text)
+
     def test_unsupported_protocol_version_is_rejected(self) -> None:
         packet = MavApplicationPacket("status")
         fragment = bytearray(MavApplicationCodec.encode(packet)[0])
@@ -264,6 +288,54 @@ class ApplicationCodecTests(unittest.TestCase):
         fragment[3] = 1
         with self.assertRaisesRegex(MavApplicationProtocolError, "flag"):
             MavApplicationCodec.decode_fragment(fragment)
+
+    def test_fragment_decoder_requires_full_nonfinal_chunks_and_zero_padding(self) -> None:
+        fragment = MavApplicationCodec.encode(
+            MavApplicationPacket("data.large", {"text": "x" * 1_000})
+        )[0]
+        magic, version, flags, packet_id, index, count, chunk_length, checksum = (
+            application_module._HEADER.unpack_from(fragment)
+        )
+        shortened = (
+            application_module._HEADER.pack(
+                magic,
+                version,
+                flags,
+                packet_id,
+                index,
+                count,
+                chunk_length - 1,
+                checksum,
+            )
+            + fragment[application_module._HEADER.size : -1]
+        )
+        empty = application_module._HEADER.pack(
+            magic, version, flags, packet_id, index, count, 0, checksum
+        )
+
+        for malformed in (shortened, empty, fragment + b"\x01"):
+            with (
+                self.subTest(length=len(malformed)),
+                self.assertRaises(MavApplicationProtocolError),
+            ):
+                MavApplicationCodec.decode_fragment(malformed)
+
+    def test_completed_packet_deduplication_expires_and_is_process_local(self) -> None:
+        fragment = MavApplicationCodec.encode(
+            MavApplicationPacket("command.execute", {"operation": "capture"}, packet_id=901)
+        )[0]
+        assembler = MavApplicationAssembler(fragment_timeout=0.01)
+
+        with patch(
+            "mavflow.application.time.monotonic",
+            side_effect=(1.0, 1.0, 1.02, 1.02),
+        ):
+            self.assertIsNotNone(assembler.accept(fragment, source_system=7, source_component=3))
+            self.assertIsNone(assembler.accept(fragment, source_system=7, source_component=3))
+            self.assertIsNotNone(assembler.accept(fragment, source_system=7, source_component=3))
+            self.assertIsNotNone(
+                MavApplicationAssembler().accept(fragment, source_system=7, source_component=3)
+            )
 
     def test_assembler_isolates_sources_and_discards_conflicting_packet_identity(self) -> None:
         first_packet = MavApplicationPacket(
@@ -461,6 +533,102 @@ class ApplicationChannelTests(unittest.TestCase):
         self.assertEqual(packets[0].payload["text"], "x" * 1_000)
         channel.stop()
 
+    def test_channel_allowed_source_pairs_do_not_form_a_cross_product(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(
+            client,  # type: ignore[arg-type]
+            network_id=14,
+            message_type=420,
+            allowed_sources=((7, 3), (8, 4)),
+        )
+        packets: list[MavApplicationPacket] = []
+        channel.packets.subscribe(packets.append)
+        channel.start()
+
+        for packet_id, source in enumerate(((7, 3), (8, 4), (7, 4), (8, 3)), start=1):
+            fragment = MavApplicationCodec.encode(
+                MavApplicationPacket("status.update", {"id": packet_id}, packet_id=packet_id)
+            )[0]
+            client.publish_fragment(
+                fragment,
+                source_system=source[0],
+                source_component=source[1],
+            )
+
+        channel.stop()
+        self.assertEqual([packet.packet_id for packet in packets], [1, 2])
+
+    def test_default_local_identity_tracks_endpoint_reconfiguration(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(client, network_id=14, message_type=420)  # type: ignore[arg-type]
+        packets: list[MavApplicationPacket] = []
+        channel.packets.subscribe(packets.append)
+        client.endpoint = MavEndpoint(source_system=55, source_component=6)
+        channel.start()
+
+        fragment = MavApplicationCodec.encode(
+            MavApplicationPacket("status.update", {}, packet_id=903)
+        )[0]
+        client.publish_fragment(fragment, target_system=55, target_component=6)
+
+        self.assertEqual((channel.local_system, channel.local_component), (55, 6))
+        self.assertEqual([packet.packet_id for packet in packets], [903])
+        channel.stop()
+
+    def test_channel_stop_waits_for_an_inflight_packet_callback(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(client, network_id=14, message_type=420)  # type: ignore[arg-type]
+        entered = threading.Event()
+        release = threading.Event()
+        stopped = threading.Event()
+        packets: list[MavApplicationPacket] = []
+
+        def block(packet: MavApplicationPacket) -> None:
+            packets.append(packet)
+            entered.set()
+            if not release.wait(1.0):
+                raise TimeoutError("test did not release the packet callback")
+
+        channel.packets.subscribe(block)
+        channel.start()
+        fragment = MavApplicationCodec.encode(
+            MavApplicationPacket("status.update", {}, packet_id=904)
+        )[0]
+        publisher = threading.Thread(target=lambda: client.publish_fragment(fragment))
+        publisher.start()
+        self.assertTrue(entered.wait(1.0))
+
+        stopper = threading.Thread(target=lambda: (channel.stop(), stopped.set()))
+        stopper.start()
+        self.assertFalse(stopped.wait(0.05))
+        release.set()
+        publisher.join(1.0)
+        stopper.join(1.0)
+
+        self.assertFalse(publisher.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(stopped.is_set())
+        client.publish_fragment(fragment)
+        self.assertEqual([packet.packet_id for packet in packets], [904])
+
+    def test_repeated_channel_start_stop_keeps_delivery_single(self) -> None:
+        client = _ApplicationClient()
+        channel = MavApplicationChannel(client, network_id=14, message_type=420)  # type: ignore[arg-type]
+        packets: list[MavApplicationPacket] = []
+        channel.packets.subscribe(packets.append)
+
+        for _ in range(1_000):
+            channel.start()
+            channel.stop()
+        channel.start()
+        fragment = MavApplicationCodec.encode(
+            MavApplicationPacket("status.update", {}, packet_id=905)
+        )[0]
+        client.publish_fragment(fragment)
+
+        self.assertEqual([packet.packet_id for packet in packets], [905])
+        channel.stop()
+
     def test_channel_publishes_protocol_errors_for_matching_frames(self) -> None:
         client = _ApplicationClient()
         channel = MavApplicationChannel(client, network_id=14, message_type=420)
@@ -527,6 +695,8 @@ class ApplicationChannelTests(unittest.TestCase):
         channel = MavApplicationChannel(client)  # type: ignore[arg-type]
         with self.assertRaises(ValueError):
             channel.send("status", target_system=256)
+        with self.assertRaises(ValueError):
+            MavApplicationChannel(client, allowed_sources=((7, 3), (256, 1)))  # type: ignore[arg-type]
         self.assertFalse(client.calls)
 
 

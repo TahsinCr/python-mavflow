@@ -240,6 +240,11 @@ submit expensive work to a bounded worker. `MavClient` and `MavRuntime` expose
 the same message bus directly as `messages` and the native EventFlow engine as
 `events`.
 
+Do not call blocking `runtime.stop()` or `runtime.close()` from a message
+callback. The runtime rejects the operation before tearing down components
+because the router cannot join its own receive thread; schedule lifecycle
+changes from another task or thread.
+
 <a id="filtering"></a>
 ### Filtering and message history
 
@@ -475,6 +480,34 @@ See [examples/application_packets.py](examples/application_packets.py) for the
 complete example. The codec rejects malformed JSON, invalid checksums,
 unsupported protocol versions, and packets outside its configured bounds.
 
+The JSON body is limited to 16,632 bytes: 72 MAVLink `V2_EXTENSION` frames with
+231 application-data bytes per frame. A full packet occupies at least 72
+MAVLink 2 frames. On 8N1 serial links, the ideal wire-time lower bound is
+`72 × (261 [+ 13 signed]) × 10 / baud`; it excludes other traffic, scheduling,
+and device delays. The frame sizes use the [MAVLink serialization
+format](https://mavlink.io/en/guide/serialization.html) and its optional
+[13-byte signing block](https://mavlink.io/en/guide/message_signing.html):
+
+| Baud | Unsigned | Signed |
+| ---: | ---: | ---: |
+| 9,600 | 19.58 s | 20.55 s |
+| 57,600 | 3.26 s | 3.43 s |
+| 115,200 | 1.63 s | 1.71 s |
+
+Actual delivery takes longer. The default three-second request timeout is aimed
+at small control messages; set a deadline for the link speed and payload size.
+The deadline counts synchronous sending, but Python cannot interrupt a transport
+send already in progress.
+
+Completed packet IDs are suppressed per MAVLink source in a bounded, in-memory
+history for at most `fragment_timeout` (10 seconds by default); cache pressure
+can evict entries sooner. This is duplicate-fragment handling, not durable
+request deduplication or an exactly-once guarantee. `request()` provides
+best-effort correlation and does not retry automatically. A repeated packet ID
+can be delivered again after expiry, eviction, or process restart; a new ID is a
+new command. Add an application-level idempotency key and persist its result
+when commands have non-repeatable side effects.
+
 <a id="peers-and-requests"></a>
 ### Peers, requests, and handlers
 
@@ -530,12 +563,35 @@ Before dispatching a handler, Mavflow checks each packet against the peer's
 current system and component identity, including dynamically resolved targets.
 A callable target that currently resolves to `0` is unknown and rejected;
 literal `0` remains a wildcard subject to any channel source allowlist. Use
-channel source allowlists when intentionally accepting packets from multiple
-systems or components.
+`source_systems` and `source_components` for independent allowlists; together
+they permit their cross-product. Use `allowed_sources` to restrict the policy
+to explicit system/component pairs, for example:
+
+~~~python
+runtime = MavRuntime(
+    endpoint,
+    application_role="gcs",
+    channel_options={"allowed_sources": ((7, 3), (8, 4))},
+)
+~~~
+
+When both forms are set, the packet must satisfy both policies. By default,
+the channel reads its local system/component IDs from the client's current
+endpoint, so reconfiguring a stopped client does not leave a channel with stale
+IDs. An explicit pair list is the multi-peer source boundary and takes
+precedence over the peer's single dynamically resolved target. Explicit
+`local_system` or `local_component` options remain fixed.
 
 The default response types are `system.ack` and `system.error`. The peer also
 tracks remote liveness and transport availability. Configure request deadlines
 and dispatcher capacity for the timing and workload of the application.
+
+Registered handlers and automatic responses run through EventFlow's bounded
+worker pool, away from the MAVLink reader. Unknown-request responses use that
+same capacity. When the pool is full, Mavflow reports the dispatcher error and
+drops the request; the remote requester will time out. This keeps transport
+sends out of the reader callback and makes saturation visible without adding an
+unbounded queue.
 
 <a id="remote-logs"></a>
 ### Remote log models

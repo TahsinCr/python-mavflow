@@ -238,6 +238,11 @@ Router callback'leri senkron teslimat sırasında çalışır; kısa tutun veya 
 işleri sınırlı bir worker'a gönderin. `MavClient` ve `MavRuntime`, aynı native
 EventFlow bus'ını `messages`, engine'i `events` olarak doğrudan sunar.
 
+Mesaj callback'i içinden bloklayan `runtime.stop()` veya `runtime.close()`
+çağırmayın. Router kendi receive thread'ini join edemediği için runtime
+bileşenleri kapatmaya başlamadan işlemi reddeder; yaşam döngüsü değişikliklerini
+başka bir task veya thread'den başlatın.
+
 <a id="filtering"></a>
 ### Filtreleme ve mesaj geçmişi
 
@@ -474,6 +479,36 @@ Tam örnek için [examples/application_packets.py](examples/application_packets.
 dosyasına bakın. Codec hatalı JSON, geçersiz checksum, desteklenmeyen protokol
 sürümü ve yapılandırılan sınırları aşan paketleri reddeder.
 
+JSON gövdesi en fazla 16.632 byte olabilir: her biri 231 uygulama verisi byte'ı
+taşıyan 72 MAVLink `V2_EXTENSION` frame'i. Tam boy bir paket en az 72 MAVLink 2
+frame'i kullanır. 8N1 seri bağlantıda ideal alt sınır
+`72 × (261 [+ imzalıysa 13]) × 10 / baud` olur; bu hesap diğer trafiği,
+zamanlamayı ve cihaz gecikmesini içermez. Frame boyutları [MAVLink serileştirme
+formatını](https://mavlink.io/en/guide/serialization.html) ve isteğe bağlı
+[13 byte'lık imza bloğunu](https://mavlink.io/en/guide/message_signing.html)
+esas alır:
+
+| Baud | İmzasız | İmzalı |
+| ---: | ---: | ---: |
+| 9.600 | 19,58 sn | 20,55 sn |
+| 57.600 | 3,26 sn | 3,43 sn |
+| 115.200 | 1,63 sn | 1,71 sn |
+
+Gerçek aktarım daha uzun sürer. Varsayılan üç saniyelik request timeout'u küçük
+kontrol mesajlarını hedefler; bağlantı hızı ve payload boyutuna göre süre seçin.
+Deadline senkron gönderimi de kapsar, ancak Python devam eden bir transport
+gönderimini kesemez.
+
+Tamamlanan paket ID'leri MAVLink kaynağı başına sınırlı bir bellek geçmişinde en
+fazla `fragment_timeout` boyunca (varsayılan 10 saniye) yinelenmez; yoğunluk
+nedeniyle cache daha erken boşaltabilir. Bu, tekrarlanan fragment'leri ele alır;
+kalıcı request deduplication veya exactly-once garantisi vermez. `request()`
+best-effort ilişkilendirme sağlar ve otomatik retry yapmaz. Aynı ID süre
+dolduktan, cache girdisi atıldıktan veya süreç yeniden başladıktan sonra tekrar
+teslim edilebilir; yeni ID yeni komut sayılır. Tekrarlanması istenmeyen yan
+etkili komutlarda uygulama seviyesinde idempotency anahtarı kullanın ve sonucu
+kalıcı olarak saklayın.
+
 <a id="peers-and-requests"></a>
 ### Eşler, istekler ve handler'lar
 
@@ -527,12 +562,36 @@ Request deadline'ı senkron gönderim ve yanıt bekleme süresinin tamamını ka
 Bloklanan transport gönderimini Python kesemez; çağrı gönderim tamamlandıktan
 sonra deadline'ın dolduğunu bildirir.
 
+Kayıtlı handler'lar ve otomatik yanıtlar EventFlow'un sınırlı worker pool'unda,
+MAVLink reader thread'inden ayrı çalışır. Bilinmeyen request yanıtları da aynı
+kapasiteyi kullanır. Pool dolduğunda Mavflow dispatcher hatasını yayımlar ve
+request'i düşürür; uzak taraftaki çağrı timeout olur. Bu davranış transport
+gönderimini reader callback'inden çıkarır ve sınırsız kuyruk eklemeden doluluğu
+görünür kılar.
+
 Mavflow handler'a vermeden önce her paketin kaynağını peer'ın güncel system ve
 component kimliğiyle doğrular; dinamik hedefler de bu kontrole dahildir.
 Callable hedef o anda `0` döndürürse kimlik bilinmiyor kabul edilir ve paket
 reddedilir; doğrudan verilen `0`, varsa channel kaynak allowlist'leriyle
-sınırlandırılmış wildcard anlamını korur. Birden fazla system veya component'ten
-paket kabul etmek istiyorsanız channel kaynak allowlist'lerini kullanın.
+sınırlandırılmış wildcard anlamını korur. `source_systems` ve
+`source_components` bağımsız allowlist'lerdir; ikisi birlikte kesişim yerine
+çarpım kümesi oluşturur. Yalnızca açık system/component çiftlerine izin vermek
+için `allowed_sources` kullanın:
+
+~~~python
+runtime = MavRuntime(
+    endpoint,
+    application_role="gcs",
+    channel_options={"allowed_sources": ((7, 3), (8, 4))},
+)
+~~~
+
+İki biçim birlikte ayarlanırsa paket ikisini de geçmelidir. Varsayılan olarak
+channel yerel system/component ID'lerini client'ın güncel endpoint'inden okur;
+durdurulmuş client yeniden yapılandırıldığında eski ID'ler kullanılmaz. Açıkça
+verilen `allowed_sources` çiftleri çoklu peer kaynak sınırını belirler ve
+peer'ın tek dinamik hedef kimliğinin önüne geçer. Açıkça verilen `local_system`
+ve `local_component` sabit kalır.
 
 <a id="remote-logs"></a>
 ### Uzak log modelleri

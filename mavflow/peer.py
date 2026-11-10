@@ -4,6 +4,7 @@ import math
 import secrets
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any
@@ -67,6 +68,7 @@ class MavApplicationPeer:
     """
 
     LIVENESS_TYPES = frozenset({"system.heartbeat", "system.ping", "system.pong"})
+    _MAX_PENDING_PONGS = 64
 
     def __init__(
         self,
@@ -108,6 +110,7 @@ class MavApplicationPeer:
         self._state = MavApplicationPeerState()
         self._pending: dict[int, _PendingRequest] = {}
         self._probes: dict[int, tuple[float, int, int]] = {}
+        self._pending_pongs: deque[tuple[int, int, int]] = deque()
         self._last_liveness_monotonic = 0.0
         self._subscriptions: list[Subscription] = []
         self._lock = threading.RLock()
@@ -153,6 +156,7 @@ class MavApplicationPeer:
                     transport_available=self._transport_ready(),
                     last_error="",
                 )
+                self._pending_pongs.clear()
             subscriptions: list[Subscription] = []
             channel_start_attempted = False
             try:
@@ -206,6 +210,7 @@ class MavApplicationPeer:
                     pending = tuple(self._pending.values())
                     self._pending.clear()
                     self._probes.clear()
+                    self._pending_pongs.clear()
                 else:
                     pending = ()
                 thread = self._monitor_thread
@@ -326,7 +331,6 @@ class MavApplicationPeer:
         expected_component = self._resolve_target(
             self._target_component if target_component is None else target_component
         )
-        packet_id = self._reserve_packet_id()
         started_monotonic = time.monotonic()
         deadline_monotonic = started_monotonic + float(timeout)
         pending = _PendingRequest(
@@ -340,6 +344,7 @@ class MavApplicationPeer:
         with self._lock:
             if not self._state.running:
                 raise ConnectionError("MAVLink application peer is not running")
+            packet_id = self._next_packet_id_locked()
             self._pending[packet_id] = pending
         try:
             request = self.send(
@@ -385,10 +390,12 @@ class MavApplicationPeer:
         probe_payload = dict(self._payload())
         probe_payload.setdefault("role", self._role)
         probe_payload.setdefault("health", "ok")
-        probe_id = self._reserve_packet_id()
         target_system = self._resolve_target(self._target_system)
         target_component = self._resolve_target(self._target_component)
         with self._lock:
+            if not self._state.running:
+                raise ConnectionError("MAVLink application peer is not running")
+            probe_id = self._next_packet_id_locked()
             self._probes[probe_id] = (time.monotonic(), target_system, target_component)
         try:
             return self.send(
@@ -462,28 +469,33 @@ class MavApplicationPeer:
             )
             state = replace(self._state)
 
-        self.changed.publish(state)
+        queue_full = False
         if packet.packet_type == "system.ping":
-            try:
-                response_payload = dict(self._payload())
-                response_payload.update(
-                    {
-                        "request_id": packet.packet_id,
-                        "role": self._role,
-                    }
-                )
-                self.send(
-                    "system.pong",
-                    response_payload,
-                    target_system=int(packet.source_system or 0),
-                    target_component=int(packet.source_component or 0),
-                )
-            except Exception as exc:
-                self._on_error(exc)
+            with self._lock:
+                if len(self._pending_pongs) >= self._MAX_PENDING_PONGS:
+                    queue_full = True
+                    self._state = replace(
+                        self._state,
+                        last_error="Application peer ping response queue is full",
+                    )
+                    state = replace(self._state)
+                else:
+                    self._pending_pongs.append(
+                        (
+                            packet.packet_id,
+                            int(packet.source_system or 0),
+                            int(packet.source_component or 0),
+                        )
+                    )
+                    self._wake.set()
+        self.changed.publish(state)
+        if queue_full:
+            self.errors.publish(RuntimeError("Application peer ping response queue is full"))
 
     def _monitor(self) -> None:
         next_probe = 0.0
         while not self._stop.is_set():
+            self._drain_pongs()
             now = time.monotonic()
             ready = self._transport_ready()
             self._set_transport_state(ready)
@@ -505,6 +517,24 @@ class MavApplicationPeer:
             )
             self._wake.wait(wait_s)
             self._wake.clear()
+
+    def _drain_pongs(self) -> None:
+        while not self._stop.is_set():
+            with self._lock:
+                if not self._state.running or not self._pending_pongs:
+                    return
+                packet_id, target_system, target_component = self._pending_pongs.popleft()
+            try:
+                response_payload = dict(self._payload())
+                response_payload.update({"request_id": packet_id, "role": self._role})
+                self.send(
+                    "system.pong",
+                    response_payload,
+                    target_system=target_system,
+                    target_component=target_component,
+                )
+            except Exception as exc:
+                self._on_error(exc)
 
     def _expire_liveness(self) -> None:
         now_monotonic = time.monotonic()
@@ -585,12 +615,11 @@ class MavApplicationPeer:
             state = replace(updated)
         self.changed.publish(state)
 
-    def _reserve_packet_id(self) -> int:
+    def _next_packet_id_locked(self) -> int:
         while True:
             packet_id = secrets.randbits(32) or 1
-            with self._lock:
-                if packet_id not in self._pending and packet_id not in self._probes:
-                    return packet_id
+            if packet_id not in self._pending and packet_id not in self._probes:
+                return packet_id
 
     def _payload(self) -> Mapping[str, Any]:
         payload = (
@@ -616,6 +645,20 @@ class MavApplicationPeer:
     def _accepts_dispatch_packet(self, packet: MavApplicationPacket) -> bool:
         """Check handler traffic against the peer's current source identity."""
 
+        allowed_sources = getattr(self._channel, "_allowed_sources", None)
+        if allowed_sources is not None:
+            if (
+                packet.source_system or 0,
+                packet.source_component or 0,
+            ) not in allowed_sources:
+                return False
+            for source, allowlist in (
+                (packet.source_system, getattr(self._channel, "_source_systems", None)),
+                (packet.source_component, getattr(self._channel, "_source_components", None)),
+            ):
+                if allowlist is not None and source not in allowlist:
+                    return False
+            return True
         target_system = self._resolve_target(self._target_system)
         target_component = self._resolve_target(self._target_component)
         for target, resolved, source, allowlist in (

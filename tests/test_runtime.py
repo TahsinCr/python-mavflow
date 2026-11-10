@@ -16,8 +16,11 @@ from mavflow import (
     MavRuntime,
 )
 from mavflow._compatibility import ExceptionGroup
-from mavflow.application import MavApplicationCodec
+from mavflow.application import MavApplicationChannel, MavApplicationCodec
+from mavflow.client import MavClient
+from mavflow.dispatch import MavApplicationDispatcher
 from mavflow.message import MavMessageEnvelope
+from mavflow.peer import MavApplicationPeer
 
 
 class FakeConnection:
@@ -475,6 +478,82 @@ class MavRuntimeTests(unittest.TestCase):
             self.assertEqual(handled, [(8, 1)])
         finally:
             runtime.stop()
+
+    def test_pair_source_allowlist_accepts_only_configured_system_component_pairs(self) -> None:
+        runtime = MavRuntime(
+            application_role="gcs",
+            channel_options={"allowed_sources": ((7, 3), (8, 4))},
+        )
+        assert runtime.dispatcher is not None
+        handled: list[tuple[int | None, int | None]] = []
+        completed = threading.Event()
+
+        def handle(packet: MavApplicationPacket) -> None:
+            handled.append((packet.source_system, packet.source_component))
+            if len(handled) == 2:
+                completed.set()
+
+        runtime.dispatcher.register("camera.capture", handle)
+        runtime.dispatcher.start()
+        accepted = runtime.dispatcher.dispatch(
+            MavApplicationPacket("camera.capture", source_system=7, source_component=3)
+        )
+        accepted_second = runtime.dispatcher.dispatch(
+            MavApplicationPacket("camera.capture", source_system=8, source_component=4)
+        )
+        rejected_cross_pair = runtime.dispatcher.dispatch(
+            MavApplicationPacket("camera.capture", source_system=7, source_component=4)
+        )
+
+        try:
+            self.assertTrue(completed.wait(1.0))
+            self.assertTrue(accepted)
+            self.assertTrue(accepted_second)
+            self.assertFalse(rejected_cross_pair)
+            self.assertEqual(handled, [(7, 3), (8, 4)])
+        finally:
+            runtime.dispatcher.stop()
+            runtime.close()
+
+    def test_injected_runtime_components_must_share_the_same_graph(self) -> None:
+        first_client = MavClient()
+        second_client = MavClient(MavEndpoint(source_system=2, source_component=4))
+        first_channel = MavApplicationChannel(first_client)
+        second_channel = MavApplicationChannel(second_client)
+        first_peer = MavApplicationPeer(first_channel, role="vehicle")
+        second_peer = MavApplicationPeer(second_channel, role="gcs")
+        second_dispatcher = MavApplicationDispatcher(second_peer)
+
+        with self.assertRaisesRegex(ValueError, "peer and channel"):
+            MavRuntime(client=first_client, channel=first_channel, peer=second_peer)
+        with self.assertRaisesRegex(ValueError, "different client"):
+            MavRuntime(client=first_client, peer=second_peer)
+        with self.assertRaisesRegex(ValueError, "dispatcher and peer"):
+            MavRuntime(peer=first_peer, dispatcher=second_dispatcher)
+
+        derived = MavRuntime(peer=first_peer)
+        self.assertIs(derived.client, first_client)
+        self.assertIs(derived.channel, first_channel)
+        derived.close()
+
+    def test_stop_and_close_from_router_callback_fail_before_partial_shutdown(self) -> None:
+        for operation in ("stop", "close"):
+            with self.subTest(operation=operation):
+                calls: list[str] = []
+                runtime = MavRuntime(
+                    client=FakeClient(calls),  # type: ignore[arg-type]
+                    peer=FakePeer(calls),  # type: ignore[arg-type]
+                )
+                runtime._running = True
+                runtime.router._thread = threading.current_thread()
+
+                with self.assertRaisesRegex(RuntimeError, "receive thread"):
+                    getattr(runtime, operation)()
+                self.assertEqual(calls, [])
+
+                runtime.router._thread = None
+                runtime._running = False
+                runtime.close()
 
     def test_failed_shutdown_is_reported_and_can_be_retried(self) -> None:
         calls: list[str] = []
