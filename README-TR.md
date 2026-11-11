@@ -248,7 +248,10 @@ EventFlow bus'ını `messages`, engine'i `events` olarak doğrudan sunar.
 Mesaj callback'i içinden bloklayan `runtime.stop()` veya `runtime.close()`
 çağırmayın. Router kendi receive thread'ini join edemediği için runtime
 bileşenleri kapatmaya başlamadan işlemi reddeder; yaşam döngüsü değişikliklerini
-başka bir task veya thread'den başlatın.
+başka bir task veya thread'den başlatın. Aynı kural peer monitor thread'i için
+de geçerlidir. Runtime başlatılırken senkron `peer.changed` callback'i içinden
+`start()`, `stop()` veya `close()` yeniden çağrılamaz; yaşam döngüsü
+değişikliklerini başlangıç tamamlandıktan sonra başlatın.
 
 <a id="filtering"></a>
 ### Filtreleme ve mesaj geçmişi
@@ -484,7 +487,8 @@ print(cozulmus.to_dict())
 
 Tam örnek için [examples/application_packets.py](examples/application_packets.py)
 dosyasına bakın. Codec hatalı JSON, geçersiz checksum, desteklenmeyen protokol
-sürümü ve yapılandırılan sınırları aşan paketleri reddeder.
+sürümü ve yapılandırılan sınırları aşan paketleri reddeder. Kodlanan JSON zarfı
+en fazla 64 seviye iç içe olabilir; encode ve decode aynı sınırı uygular.
 
 JSON gövdesi en fazla 16.632 byte olabilir: her biri 231 uygulama verisi byte'ı
 taşıyan 72 MAVLink `V2_EXTENSION` frame'i. Her frame 254 byte MAVLink payload'u
@@ -815,6 +819,7 @@ sonra benchmark modülünü proje kökünden çalıştırın:
 ~~~bash
 python -m benchmarks.benchmark_router --subscribers 10 --matching-ratio 10 --output router-run.json
 python -m benchmarks.benchmark_codec --output codec-run.json
+python -m benchmarks.benchmark_codec --payload-bytes 2048 --payload-shape brackets --output codec-brackets.json
 python -m pyperf show --metadata --stats router-run.json
 python -m pyperf compare_to --table benchmarks/results/router.json router-run.json
 ~~~
@@ -826,11 +831,17 @@ fan-out sayısını karşılaştırmak için `--subscribers` (ör. 1, 10 veya 10
 trafik oranı için `--matching-ratio` (0, 10, 50 veya 100) değerini değiştirin.
 Tek bir tamamlama gözlemcisi, ölçümün son envelope dispatch'ini kapsamasını sağlar
 ve metadata'da belirtilir. Bu router teslimat benchmark'ıdır; gerçek UDP loopback
-testi ayrı bir doğruluk kontrolüdür. Codec benchmark'ı
-uygulama paketi kodlama ve birleştirmeyi ölçer. `--fast` yalnız CI smoke
-kontrolleri içindir; yerel ölçümlerde varsayılan kalibrasyonu kullanın.
-Sonuçlar kaydedilen yorumlayıcıya, platforma, kaynak fingerprint'ine ve iş
-yüküne özgüdür; canlı sistem performansı garantisi değildir. İş yükleri ve
+testi ayrı bir doğruluk kontrolüdür. Codec benchmark'ı uygulama paketi kodlama
+ve birleştirmeyi ölçer. `--payload-shape` seçenekleri `flat`, `brackets` ve
+`nested` değerleridir; farklı boyut ve JSON biçimlerini kapsamak için
+`--payload-bytes` değerini (ör. 128, 512, 2.048, 8.192 ve 16.000) değiştirin.
+Bu seçenek payload değerinin boyutunu belirler; tam JSON zarfı ek byte'lar
+içerir. `--fast` yalnız CI smoke kontrolleri içindir; yerel ölçümlerde varsayılan
+kalibrasyonu kullanın. Tekrar ölçümleri aynı kaynak fingerprint'iyle
+yapılmalıdır. Kod öncesi/sonrası karşılaştırmalarda fingerprint'lerin farklı
+olması beklenir; yorumlayıcıyı, platformu, iş yükünü ve ölçüm koşullarını sabit
+tutup iki revizyonu da raporlayın. Bu, canlı sistem performansı garantisi
+değildir. İş yükleri ve
 karşılaştırma notları için [benchmarks/results/README.md](benchmarks/results/README.md)
 dosyasına bakın.
 

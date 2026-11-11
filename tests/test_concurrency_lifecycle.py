@@ -144,6 +144,23 @@ class RouterLifecycleTests(unittest.TestCase):
         self.assertFalse(router._cleanup_pending)
         self.assertEqual(connection.stop_count, 1)
 
+    def test_router_rolls_back_when_receive_thread_cannot_be_created(self) -> None:
+        connection = _RestartableConnection()
+        router = MavMessageRouter(connection, poll_timeout=0.01)  # type: ignore[arg-type]
+
+        with patch(
+            "mavflow.router.threading.Thread",
+            side_effect=RuntimeError("thread construction failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "thread construction failed"):
+                router.start()
+
+        self.assertFalse(router.running)
+        self.assertIsNone(router._thread)
+        self.assertFalse(router._cleanup_pending)
+        self.assertEqual(connection.start_count, 1)
+        self.assertEqual(connection.stop_count, 1)
+
     def test_router_rejects_stop_from_its_synchronous_message_callback(self) -> None:
         connection = _RestartableConnection()
         router = MavMessageRouter(
@@ -988,6 +1005,63 @@ class DispatcherLifecycleTests(unittest.TestCase):
         self.assertTrue(dispatcher.dispatch(MavApplicationPacket("camera.capture", packet_id=104)))
         self.assertTrue(handled.wait(1.0))
         dispatcher.stop()
+
+    def test_stop_suppresses_unknown_request_response_from_old_generation(self) -> None:
+        peer = _PeerStub()
+        dispatcher = MavApplicationDispatcher(peer, workers=1, max_pending=1)  # type: ignore[arg-type]
+        response_started = threading.Event()
+        release_response = threading.Event()
+        stop_started = threading.Event()
+        stop_errors: list[Exception] = []
+        dispatcher.start()
+        generation = dispatcher._generation
+        respond_if_active = dispatcher._respond_if_active_generation
+
+        def delayed_response(
+            packet: MavApplicationPacket,
+            result: Any,
+            packet_generation: int,
+        ) -> None:
+            response_started.set()
+            if release_response.wait(1.0):
+                respond_if_active(packet, result, packet_generation)
+
+        def stop() -> None:
+            stop_started.set()
+            try:
+                dispatcher.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        with patch.object(
+            dispatcher, "_respond_if_active_generation", side_effect=delayed_response
+        ):
+            self.assertFalse(
+                dispatcher.dispatch(
+                    MavApplicationPacket(
+                        "unknown.request",
+                        packet_id=400,
+                        source_system=1,
+                        source_component=1,
+                        expects_response=True,
+                    )
+                )
+            )
+            self.assertTrue(response_started.wait(1.0))
+            stopper = threading.Thread(target=stop)
+            stopper.start()
+            self.assertTrue(stop_started.wait(1.0))
+            deadline = time.monotonic() + 1.0
+            while dispatcher._generation == generation and time.monotonic() < deadline:
+                time.sleep(0.001)
+            generation_changed = dispatcher._generation != generation
+            release_response.set()
+            stopper.join(1.0)
+
+        self.assertTrue(generation_changed)
+        self.assertFalse(stopper.is_alive())
+        self.assertFalse(stop_errors)
+        self.assertFalse(peer.sent)
 
 
 if __name__ == "__main__":

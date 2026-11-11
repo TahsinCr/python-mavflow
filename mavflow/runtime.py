@@ -142,6 +142,7 @@ class MavRuntime:
         self._closed = False
         self._lock = threading.RLock()
         self._lifecycle_lock = threading.RLock()
+        self._starting_thread: threading.Thread | None = None
 
     @property
     def running(self) -> bool:
@@ -181,6 +182,10 @@ class MavRuntime:
             with self._lock:
                 if self._closed:
                     raise RuntimeError("MAVLink runtime is closed")
+                if self._starting_thread is threading.current_thread():
+                    raise RuntimeError(
+                        "MAVLink runtime lifecycle cannot reenter its startup callback"
+                    )
                 if self._cleanup_pending:
                     raise RuntimeError("MAVLink runtime cleanup must complete before restart")
                 if self._running:
@@ -191,22 +196,22 @@ class MavRuntime:
                         "MAVLink endpoint peer identity changed after runtime creation; "
                         "create a new runtime for the new peer"
                     )
-            started_stops: list[Callable[[], None]] = []
+            self._starting_thread = threading.current_thread()
+            cleanup_callbacks: list[Callable[[], None]] = [self.client.stop]
             try:
                 self.client.start()
-                started_stops.append(self.client.stop)
                 if self.peer is not None:
                     self.peer.start()
-                    started_stops.append(self.peer.stop)
+                    cleanup_callbacks.append(self.peer.stop)
                 elif self.channel is not None:
                     self.channel.start()
-                    started_stops.append(self.channel.stop)
+                    cleanup_callbacks.append(self.channel.stop)
                 if self.dispatcher is not None:
                     self.dispatcher.start()
-                    started_stops.append(self.dispatcher.stop)
+                    cleanup_callbacks.append(self.dispatcher.stop)
             except Exception:
                 cleanup_failed = False
-                for stop_component in reversed(started_stops):
+                for stop_component in reversed(cleanup_callbacks):
                     try:
                         stop_component()
                     except Exception:
@@ -214,15 +219,23 @@ class MavRuntime:
                 with self._lock:
                     self._cleanup_pending = cleanup_failed
                 raise
-            with self._lock:
-                self._running = True
+            else:
+                with self._lock:
+                    self._running = True
+            finally:
+                self._starting_thread = None
 
     def stop(self) -> None:
         """Stop every owned layer in reverse order and preserve all errors."""
 
         with self._lifecycle_lock:
-            if getattr(self.router, "_thread", None) is threading.current_thread():
+            current_thread = threading.current_thread()
+            if self._starting_thread is current_thread:
+                raise RuntimeError("MAVLink runtime cannot stop or close from a startup callback")
+            if getattr(self.router, "_thread", None) is current_thread:
                 raise RuntimeError("MAVLink runtime cannot stop from its router receive thread")
+            if getattr(self.peer, "_monitor_thread", None) is current_thread:
+                raise RuntimeError("MAVLink runtime cannot stop from its peer monitor thread")
             with self._lock:
                 if not self._running and not self._cleanup_pending:
                     return

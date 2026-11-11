@@ -249,7 +249,10 @@ the same message bus directly as `messages` and the native EventFlow engine as
 Do not call blocking `runtime.stop()` or `runtime.close()` from a message
 callback. The runtime rejects the operation before tearing down components
 because the router cannot join its own receive thread; schedule lifecycle
-changes from another task or thread.
+changes from another task or thread. The same rule applies to the peer monitor
+thread. A synchronous `peer.changed` callback during runtime startup also cannot
+reenter `start()`, `stop()`, or `close()`; defer lifecycle changes until startup
+returns.
 
 <a id="filtering"></a>
 ### Filtering and message history
@@ -485,6 +488,8 @@ print(decoded.to_dict())
 See [examples/application_packets.py](examples/application_packets.py) for the
 complete example. The codec rejects malformed JSON, invalid checksums,
 unsupported protocol versions, and packets outside its configured bounds.
+The encoded JSON envelope may be nested at most 64 levels; both encode and
+decode enforce the same limit.
 
 The JSON body is limited to 16,632 bytes: 72 MAVLink `V2_EXTENSION` frames with
 231 application-data bytes per frame. Each frame carries a 254-byte MAVLink
@@ -812,6 +817,7 @@ then run a benchmark module from the repository root:
 ~~~bash
 python -m benchmarks.benchmark_router --subscribers 10 --matching-ratio 10 --output router-run.json
 python -m benchmarks.benchmark_codec --output codec-run.json
+python -m benchmarks.benchmark_codec --payload-bytes 2048 --payload-shape brackets --output codec-brackets.json
 python -m pyperf show --metadata --stats router-run.json
 python -m pyperf compare_to --table benchmarks/results/router.json router-run.json
 ~~~
@@ -823,11 +829,16 @@ EventFlow callback fan-out (for example, 1, 10, or 100 subscribers) and
 `--matching-ratio` to measure 0%, 10%, 50%, or 100% matching traffic. A single
 completion observer ensures the timed interval includes the final envelope
 dispatch and is recorded in metadata. This is a router delivery benchmark; the
-real UDP loopback test is a separate correctness check. The codec benchmark measures
-application packet encoding and reassembly. `--fast` is for CI smoke checks;
-use the default calibration for local measurements. Results are specific to
-their recorded interpreter, platform, source fingerprint, and workload. They
-are not deployment guarantees. See
+real UDP loopback test is a separate correctness check. The codec benchmark
+measures application packet encoding and reassembly. Its `--payload-shape`
+options are `flat`, `brackets`, and `nested`; measure several `--payload-bytes`
+values (for example 128, 512, 2,048, 8,192, and 16,000) to cover different body
+sizes and JSON shapes. This option sizes the payload value; the full envelope
+adds bytes. `--fast` is for CI smoke checks; use the default calibration for
+local measurements. Repeatability runs should match the source fingerprint.
+Before/after code comparisons necessarily use different fingerprints; hold the
+interpreter, platform, workload, and measurement conditions constant and report
+both revisions. These measurements are not deployment guarantees. See
 [benchmarks/results/README.md](benchmarks/results/README.md) for the workload
 definitions and comparison guidance.
 

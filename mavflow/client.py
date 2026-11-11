@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from typing import Any
 
 from eventflow import EventBus
@@ -34,6 +35,7 @@ class MavClient:
         self.events.add("mavlink.messages", self.router.messages)
         self.events.add("mavlink.connection.errors", self.connection.errors)
         self.events.add("mavlink.router.errors", self.router.errors)
+        self._lifecycle_lock = threading.RLock()
 
     @property
     def endpoint(self) -> MavEndpoint:
@@ -56,16 +58,19 @@ class MavClient:
         return self.router.messages
 
     def start(self) -> None:
-        self.router.start()
+        with self._lifecycle_lock:
+            self.router.start()
 
     def stop(self) -> None:
-        self.router.stop()
+        with self._lifecycle_lock:
+            self.router.stop()
 
     def configure_endpoint(self, endpoint: MavEndpoint) -> None:
         """Change transport settings of a closed client for its next connection."""
-        if self.router.running or self.connection.is_connected:
-            raise RuntimeError("Çalışan MAVLink istemcisi yeniden yapılandırılamaz")
-        self.connection.endpoint = endpoint
+        with self._lifecycle_lock:
+            if self.router.running or self.connection.is_connected:
+                raise RuntimeError("Çalışan MAVLink istemcisi yeniden yapılandırılamaz")
+            self.connection.endpoint = endpoint
 
     close = stop
 

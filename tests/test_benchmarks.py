@@ -87,7 +87,7 @@ class PyperfRunnerTests(unittest.TestCase):
             (
                 "benchmarks.benchmark_codec",
                 ("--payload-bytes", "32"),
-                {"payload_bytes": 32},
+                {"payload_bytes": 32, "payload_shape": "flat"},
             ),
         )
         for module, workload_args, expected_metadata in benchmarks:

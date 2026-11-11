@@ -6,7 +6,7 @@ import time
 import unittest
 from collections.abc import Mapping
 from types import SimpleNamespace
-from typing import cast
+from typing import Any, cast
 from unittest.mock import patch
 
 from eventflow import EventBus
@@ -257,6 +257,52 @@ class ApplicationCodecTests(unittest.TestCase):
 
         self.assertIsNotNone(decoded)
         self.assertEqual(decoded.payload["text"], text)
+
+    def test_codec_enforces_the_same_json_depth_limit_for_encoding_and_decoding(self) -> None:
+        at_limit: Any = "value"
+        for _ in range(62):
+            at_limit = [at_limit]
+        packet = MavApplicationPacket("status.depth", {"data": at_limit}, packet_id=903)
+        assembler = MavApplicationAssembler()
+        decoded = None
+        for fragment in MavApplicationCodec.encode(packet):
+            decoded = assembler.accept(fragment)
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.payload, packet.payload)
+
+        beyond_limit: Any = "value"
+        for _ in range(63):
+            beyond_limit = [beyond_limit]
+        too_deep = MavApplicationPacket("status.depth", {"data": beyond_limit}, packet_id=904)
+        with self.assertRaisesRegex(MavApplicationProtocolError, "nesting|iç içe"):
+            MavApplicationCodec.encode(too_deep)
+
+    def test_codec_round_trips_payload_size_and_shape_matrix(self) -> None:
+        sizes = (128, 512, 2_048, 8_192, 16_000)
+        shapes = ("flat", "brackets", "nested")
+        for payload_bytes in sizes:
+            for shape in shapes:
+                with self.subTest(payload_bytes=payload_bytes, shape=shape):
+                    if shape == "brackets":
+                        value: Any = ("[]{}" * (payload_bytes // 4)) + "[]{}"[: payload_bytes % 4]
+                    elif shape == "nested":
+                        depth = min(62, max(1, payload_bytes // 256))
+                        value = "x" * max(1, payload_bytes - 11 * depth)
+                        for _ in range(depth):
+                            value = {"nested": value}
+                    else:
+                        value = "x" * payload_bytes
+
+                    packet = MavApplicationPacket(
+                        "benchmark.payload", {"data": value}, packet_id=905
+                    )
+                    assembler = MavApplicationAssembler()
+                    decoded = None
+                    for fragment in MavApplicationCodec.encode(packet):
+                        decoded = assembler.accept(fragment)
+
+                    self.assertIsNotNone(decoded)
+                    self.assertEqual(decoded.payload, packet.payload)
 
     def test_unsupported_protocol_version_is_rejected(self) -> None:
         packet = MavApplicationPacket("status")

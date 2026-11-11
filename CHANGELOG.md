@@ -111,6 +111,14 @@ All notable changes to Mavflow are documented here.
   wait for in-flight channel callbacks during stop.
 - Reject runtime stop/close calls from the router receive callback before
   tearing down any owned component.
+- Keep client cleanup under runtime ownership when startup fails, and reject
+  runtime lifecycle reentry from peer monitor and startup callbacks before
+  partial shutdown.
+- Serialize client start, stop, and endpoint configuration; reject stale
+  dispatcher generations before sending unsupported-request responses.
+- Roll back router startup when reader thread construction or start fails.
+- Enforce the JSON nesting limit on both encode and decode, using a fast
+  delimiter-count path for shallow payloads and string-aware scanning otherwise.
 - Send peer pongs and automatic dispatcher replies through existing worker
   threads rather than performing transport I/O on the router callback path.
 - Reject duplicate JSON object keys, excessive nesting, malformed fragment

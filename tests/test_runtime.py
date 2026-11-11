@@ -5,6 +5,7 @@ import time
 import unittest
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import patch
 
 from eventflow import EventBus, EventFilter
 from eventflow.engine import EventEngine
@@ -81,6 +82,7 @@ class FakePeer:
         self.alive = True
         self.sent: list[tuple[str, Any]] = []
         self.requests: list[tuple[tuple[Any, ...], dict[str, Any]]] = []
+        self._monitor_thread: threading.Thread | None = None
 
     def start(self) -> None:
         self.calls.append("peer:start")
@@ -184,6 +186,52 @@ class MavRuntimeTests(unittest.TestCase):
             ],
         )
         self.assertFalse(runtime.running)
+        runtime.close()
+
+    def test_runtime_stop_retries_client_cleanup_after_partial_start_failure(self) -> None:
+        class RetryCleanupConnection:
+            def __init__(self) -> None:
+                self.endpoint = MavEndpoint()
+                self.errors = EventBus[Exception]()
+                self.target_system = 1
+                self.target_component = 1
+                self.is_connected = False
+                self.stop_attempts = 0
+
+            def start(self) -> None:
+                self.is_connected = True
+
+            def stop(self) -> None:
+                self.stop_attempts += 1
+                if self.stop_attempts <= 2:
+                    raise OSError("connection cleanup failed")
+                self.is_connected = False
+
+            def receive(self, *, blocking: bool = False, timeout: float | None = None) -> None:
+                del blocking, timeout
+                return None
+
+            def evaluate_condition(self, _condition: str) -> bool:
+                return True
+
+        connection = RetryCleanupConnection()
+        runtime = MavRuntime(client=MavClient(connection=connection))  # type: ignore[arg-type]
+
+        with patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("thread start failed")
+        ):
+            with self.assertRaisesRegex(OSError, "connection cleanup failed"):
+                runtime.start()
+
+        self.assertTrue(runtime._cleanup_pending)
+        self.assertTrue(connection.is_connected)
+        self.assertEqual(connection.stop_attempts, 2)
+
+        runtime.stop()
+
+        self.assertFalse(runtime._cleanup_pending)
+        self.assertFalse(connection.is_connected)
+        self.assertEqual(connection.stop_attempts, 3)
         runtime.close()
 
     def test_start_and_stop_are_serialized_across_the_full_transition(self) -> None:
@@ -580,6 +628,74 @@ class MavRuntimeTests(unittest.TestCase):
                 runtime.router._thread = None
                 runtime._running = False
                 runtime.close()
+
+    def test_stop_and_close_from_peer_monitor_callback_fail_before_partial_shutdown(self) -> None:
+        for operation in ("stop", "close"):
+            with self.subTest(operation=operation):
+                calls: list[str] = []
+                peer = FakePeer(calls)
+                dispatcher = FakeDispatcher(calls)
+                runtime = MavRuntime(
+                    client=FakeClient(calls),  # type: ignore[arg-type]
+                    peer=peer,  # type: ignore[arg-type]
+                    dispatcher=dispatcher,  # type: ignore[arg-type]
+                )
+                runtime._running = True
+                callback_errors: list[Exception] = []
+
+                def stop_from_monitor(_state: Any) -> None:
+                    peer._monitor_thread = threading.current_thread()
+                    try:
+                        getattr(runtime, operation)()
+                    except Exception as exc:
+                        callback_errors.append(exc)
+
+                peer.changed.subscribe(stop_from_monitor)
+                monitor = threading.Thread(target=lambda: peer.changed.publish(None))
+                monitor.start()
+                monitor.join(1.0)
+
+                self.assertFalse(monitor.is_alive())
+                self.assertEqual(len(callback_errors), 1)
+                self.assertRegex(str(callback_errors[0]), "peer monitor thread")
+                self.assertTrue(runtime.running)
+                self.assertFalse(any(call.endswith(":stop") for call in calls))
+
+                peer._monitor_thread = None
+                runtime._running = False
+                runtime.close()
+
+    def test_stop_and_close_reentry_from_peer_start_callback_are_rejected(self) -> None:
+        calls: list[str] = []
+
+        class CallbackPeer(FakePeer):
+            def start(self) -> None:
+                super().start()
+                self.changed.publish(None)
+
+        peer = CallbackPeer(calls)
+        runtime = MavRuntime(
+            client=FakeClient(calls),  # type: ignore[arg-type]
+            peer=peer,  # type: ignore[arg-type]
+            dispatcher=FakeDispatcher(calls),  # type: ignore[arg-type]
+        )
+        callback_errors: list[Exception] = []
+
+        def reenter_lifecycle(_state: Any) -> None:
+            for operation in ("stop", "close"):
+                try:
+                    getattr(runtime, operation)()
+                except Exception as exc:
+                    callback_errors.append(exc)
+
+        peer.changed.subscribe(reenter_lifecycle)
+        runtime.start()
+
+        self.assertEqual(len(callback_errors), 2)
+        self.assertTrue(all("startup callback" in str(error) for error in callback_errors))
+        self.assertTrue(runtime.running)
+        self.assertEqual(calls[:3], ["client:start", "peer:start", "dispatcher:start"])
+        runtime.close()
 
     def test_failed_shutdown_is_reported_and_can_be_retried(self) -> None:
         calls: list[str] = []

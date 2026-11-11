@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 import unittest
 from typing import Any
 
@@ -113,6 +114,57 @@ class MavClientTests(unittest.TestCase):
 
         self.assertEqual(self.router.calls, ["start", "stop"])
         self.assertFalse(self.router.running)
+
+    def test_endpoint_configuration_waits_for_client_start_transition(self) -> None:
+        start_entered = threading.Event()
+        release_start = threading.Event()
+        configure_started = threading.Event()
+        configure_finished = threading.Event()
+        errors: list[Exception] = []
+
+        class BlockingRouter(_Router):
+            def start(self) -> None:
+                self.calls.append("start")
+                start_entered.set()
+                if not release_start.wait(1.0):
+                    raise TimeoutError("test did not release router startup")
+                self.running = True
+
+        connection = _Connection(self.endpoint)
+        router = BlockingRouter(connection)
+        client = MavClient(
+            connection=connection,  # type: ignore[arg-type]
+            router=router,  # type: ignore[arg-type]
+        )
+        next_endpoint = MavEndpoint.tcp("localhost", 5760)
+        starter = threading.Thread(target=client.start)
+
+        def configure() -> None:
+            configure_started.set()
+            try:
+                client.configure_endpoint(next_endpoint)
+            except Exception as exc:
+                errors.append(exc)
+            finally:
+                configure_finished.set()
+
+        starter.start()
+        self.assertTrue(start_entered.wait(1.0))
+        configurer = threading.Thread(target=configure)
+        configurer.start()
+        self.assertTrue(configure_started.wait(1.0))
+        configuration_was_serialized = not configure_finished.wait(0.05)
+        release_start.set()
+        starter.join(1.0)
+        configurer.join(1.0)
+
+        self.assertTrue(configuration_was_serialized)
+        self.assertFalse(starter.is_alive())
+        self.assertFalse(configurer.is_alive())
+        self.assertEqual(len(errors), 1)
+        self.assertIsInstance(errors[0], RuntimeError)
+        self.assertIs(client.endpoint, self.endpoint)
+        client.stop()
 
 
 if __name__ == "__main__":

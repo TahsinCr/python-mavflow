@@ -128,12 +128,12 @@ class MavMessageRouter:
                 self._estimated_dropped_messages = 0
                 self._running = True
                 self._started_monotonic = time.monotonic()
-            self._thread = threading.Thread(
-                target=self._read_loop,
-                name="MavRouter",
-                daemon=True,
-            )
             try:
+                self._thread = threading.Thread(
+                    target=self._read_loop,
+                    name="MavRouter",
+                    daemon=True,
+                )
                 self._thread.start()
             except Exception as exc:
                 start_error = exc

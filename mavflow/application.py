@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import secrets
 import struct
 import threading
@@ -30,6 +31,7 @@ _MAX_FRAGMENT_COUNT = 72
 _MAX_PACKET_BYTES = _CHUNK_SIZE * _MAX_FRAGMENT_COUNT
 _MAX_PACKET_TYPE_LENGTH = 96
 _MAX_JSON_DEPTH = 64
+_JSON_DEPTH_TOKEN = re.compile(r'"(?:\\.|[^"\\])*"|[{}\[\]]')
 
 
 class MavApplicationProtocolError(ValueError):
@@ -85,27 +87,21 @@ def _reject_duplicate_json_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 
 def _validate_json_depth(body: str) -> None:
+    if body.count("{") + body.count("[") <= _MAX_JSON_DEPTH:
+        return
+
     depth = 0
-    in_string = False
-    escaped = False
-    for character in body:
-        if in_string:
-            if escaped:
-                escaped = False
-            elif character == "\\":
-                escaped = True
-            elif character == '"':
-                in_string = False
+    for match in _JSON_DEPTH_TOKEN.finditer(body):
+        token = match.group()
+        if token.startswith('"'):
             continue
-        if character == '"':
-            in_string = True
-        elif character in "{[":
+        if token in "{[":
             depth += 1
             if depth > _MAX_JSON_DEPTH:
                 raise MavApplicationProtocolError(
                     f"Uygulama JSON iç içe geçme sınırını aştı: {_MAX_JSON_DEPTH}"
                 )
-        elif character in "}]":
+        else:
             depth -= 1
             if depth < 0:
                 raise MavApplicationProtocolError("Uygulama JSON iç içe geçmesi geçersiz")
@@ -231,7 +227,7 @@ class MavApplicationCodec:
     @classmethod
     def encode(cls, packet: MavApplicationPacket) -> tuple[bytes, ...]:
         try:
-            body = json.dumps(
+            json_body = json.dumps(
                 {
                     "type": packet.packet_type,
                     "payload": packet._copy_payload_value(packet.payload),
@@ -241,7 +237,11 @@ class MavApplicationCodec:
                 ensure_ascii=False,
                 allow_nan=False,
                 separators=(",", ":"),
-            ).encode("utf-8")
+            )
+            _validate_json_depth(json_body)
+            body = json_body.encode("utf-8")
+        except MavApplicationProtocolError:
+            raise
         except (TypeError, ValueError) as exc:
             raise MavApplicationProtocolError(
                 f"Uygulama paketi JSON olarak kodlanamadı: {exc}"

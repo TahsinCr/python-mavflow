@@ -227,7 +227,13 @@ class MavApplicationDispatcher:
                     {"error_type": "UnsupportedPacket"},
                 )
                 try:
-                    work_pool.submit(self._run_in_worker, self._respond, packet, result)
+                    work_pool.submit(
+                        self._run_in_worker,
+                        self._respond_if_active_generation,
+                        packet,
+                        result,
+                        generation,
+                    )
                 except Exception as exc:
                     self.errors.publish(exc)
             return False
@@ -344,6 +350,15 @@ class MavApplicationDispatcher:
             )
         except Exception as exc:
             self.errors.publish(exc)
+
+    def _respond_if_active_generation(
+        self,
+        request: MavApplicationPacket,
+        result: MavApplicationResult,
+        generation: int,
+    ) -> None:
+        if self._is_generation_active(generation):
+            self._respond(request, result)
 
     def _is_generation_active(self, generation: int) -> bool:
         with self._lock:
