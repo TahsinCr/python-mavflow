@@ -349,7 +349,8 @@ class MavApplicationCodec:
                 parse_constant=lambda value: _raise_invalid_json_constant(value),
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
-            _validate_json_unicode(decoded)
+            if "\\u" in json_body:
+                _validate_json_unicode(decoded)
         except MavApplicationProtocolError:
             raise
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:

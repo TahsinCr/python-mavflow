@@ -13,6 +13,8 @@ All notable changes to Mavflow are documented here.
   reentrant client lifecycle calls from a connection startup callback.
 - Reject decoded JSON strings containing unpaired Unicode surrogates so decode
   and UTF-8 re-encoding accept the same wire-format values.
+- Run the decoded-value Unicode walk only when the JSON body contains a `\u`
+  escape, keeping the normal decode path free of an extra Python tree traversal.
 
 ### Added
 

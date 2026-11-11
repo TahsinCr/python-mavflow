@@ -263,6 +263,20 @@ class ApplicationCodecTests(unittest.TestCase):
         self.assertIsNotNone(decoded)
         self.assertEqual(decoded.payload["value"], "🚀")
 
+    def test_json_decoder_preserves_literal_unicode_escape_text(self) -> None:
+        packet = MavApplicationCodec.decode_packet(
+            1,
+            rb'{"type":"status","payload":{"value":"\\ud800"},"sent_at":1.0,"reply":false}',
+        )
+
+        assembler = MavApplicationAssembler()
+        decoded = None
+        for fragment in MavApplicationCodec.encode(packet):
+            decoded = assembler.accept(fragment)
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.payload["value"], r"\ud800")
+
     def test_json_decoder_rejects_duplicate_keys_invalid_utf8_and_excessive_depth(self) -> None:
         malformed_bodies = (
             b'{"type":"status","payload":{},"sent_at":1,"sent_at":2}',
