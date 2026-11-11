@@ -69,6 +69,7 @@ def _append_workload_arguments(command: list[str], args: argparse.Namespace) -> 
         ("subscribers", "--subscribers"),
         ("matching_ratio", "--matching-ratio"),
         ("payload_bytes", "--payload-bytes"),
+        ("payload_shape", "--payload-shape"),
     ):
         value: Any = getattr(args, attribute, None)
         if value is not None:

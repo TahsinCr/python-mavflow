@@ -52,6 +52,8 @@ All notable changes to Mavflow are documented here.
 
 ### Fixed
 
+- Forward the codec payload shape to pyperf worker processes so they execute the
+  workload recorded in the suite metadata.
 - Send a fixed safe message for unexpected application handler exceptions while
   retaining the original exception on the local dispatcher error bus.
 - Decode completed application packets before recording their IDs for duplicate
