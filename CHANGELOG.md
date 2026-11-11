@@ -115,7 +115,9 @@ All notable changes to Mavflow are documented here.
   threads rather than performing transport I/O on the router callback path.
 - Reject duplicate JSON object keys, excessive nesting, malformed fragment
   lengths, and non-zero fragment padding before application dispatch.
-- Refresh pyperf router and codec result files against the current source.
+- Refresh the six pyperf router and codec reference suites against the fifth
+  audit's fixed source revision; archive the previous baseline and document
+  benchmark stability limits.
 - Document that pymavlink condition expressions must come from trusted code,
   and that `is_connected` reports an open raw connection rather than peer health.
 
