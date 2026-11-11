@@ -52,6 +52,21 @@ All notable changes to Mavflow are documented here.
 
 ### Fixed
 
+- Send a fixed safe message for unexpected application handler exceptions while
+  retaining the original exception on the local dispatcher error bus.
+- Decode completed application packets before recording their IDs for duplicate
+  suppression, strictly validate correlated request IDs, and enforce public
+  fragment and packet size limits.
+- Publish connection startup errors after releasing the lifecycle lock and roll
+  back a router connection when its receive thread cannot start; retain failed
+  cleanup for a later stop retry.
+- Mark every EventFlow dispatcher worker path so shutdown from an unsupported-
+  request response cannot wait for its own worker.
+- Reject runtime startup when a default peer's endpoint-derived identity was
+  changed after runtime construction.
+- Cover lone-surrogate encoding failures in the protocol-error contract.
+- Correct the 8N1 serial lower-bound calculation for the five-byte
+  `V2_EXTENSION` routing/message-type fields in both README languages.
 - Require the published EventFlow 1.3.2 release and install it through normal
   package resolution in local environments and GitHub Actions.
 - Validate application peer responses against the destination system and

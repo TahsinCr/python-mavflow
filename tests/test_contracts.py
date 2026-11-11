@@ -458,6 +458,65 @@ class ConnectionTests(unittest.TestCase):
         self.assertEqual(raw.closed, 1)
         self.assertIsInstance(errors[-1], TimeoutError)
 
+    def test_connect_error_callbacks_run_after_releasing_lifecycle_lock(self) -> None:
+        raw = _RawConnection([])
+        connection = MavConnection(
+            MavEndpoint(heartbeat_timeout=0.1),
+            connection_factory=lambda _endpoint: raw,
+        )
+        connection.errors.subscribe(lambda _error: connection.stop())
+        send_lock_acquired = threading.Event()
+        lifecycle_lock_held = threading.Event()
+        raw_access_requested = threading.Event()
+        send_errors: list[Exception] = []
+        connect_errors: list[Exception] = []
+
+        def wait_for_heartbeat(_connection: Any) -> None:
+            lifecycle_lock_held.set()
+            if not raw_access_requested.wait(1.0):
+                raise TimeoutError("raw access was not requested")
+            return None
+
+        def send_path() -> None:
+            try:
+                with connection._send_lock:
+                    send_lock_acquired.set()
+                    if not lifecycle_lock_held.wait(1.0):
+                        raise TimeoutError("connect did not enter its lifecycle lock")
+                    raw_access_requested.set()
+                    try:
+                        self.assertIsNotNone(connection.raw)
+                    except ConnectionError:
+                        pass
+            except Exception as exc:
+                send_errors.append(exc)
+
+        def connect_path() -> None:
+            try:
+                connection.start()
+            except Exception as exc:
+                connect_errors.append(exc)
+
+        sending = threading.Thread(target=send_path)
+        sending.start()
+        self.assertTrue(send_lock_acquired.wait(1.0))
+        with patch.object(
+            connection,
+            "_wait_vehicle_heartbeat",
+            side_effect=wait_for_heartbeat,
+        ):
+            connecting = threading.Thread(target=connect_path)
+            connecting.start()
+            connecting.join(1.0)
+        sending.join(1.0)
+
+        self.assertFalse(connecting.is_alive())
+        self.assertFalse(sending.is_alive())
+        self.assertEqual(send_errors, [])
+        self.assertEqual(len(connect_errors), 1)
+        self.assertIsInstance(connect_errors[0], TimeoutError)
+        self.assertEqual(raw.closed, 1)
+
     def test_invalid_send_method_is_reported(self) -> None:
         raw = _RawConnection(["vehicle"])
         connection = MavConnection(

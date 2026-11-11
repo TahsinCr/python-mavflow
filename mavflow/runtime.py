@@ -64,6 +64,7 @@ class MavRuntime:
         self.client = client
         self.connection = self.client.connection
         self.router = self.client.router
+        self._endpoint_peer_identity: dict[str, int] = {}
 
         role = str(application_role).strip().lower() if application_role else ""
         if channel is not None and peer is None and not role:
@@ -75,6 +76,13 @@ class MavRuntime:
 
         if peer is None and role:
             peer_config = dict(peer_options or {})
+            for endpoint_field, peer_field in (
+                ("expected_system", "target_system"),
+                ("expected_component", "target_component"),
+            ):
+                expected_identity = getattr(self.client.endpoint, endpoint_field)
+                if peer_field not in peer_config and expected_identity is not None:
+                    self._endpoint_peer_identity[endpoint_field] = expected_identity
             peer_config.setdefault(
                 "target_system",
                 self.client.endpoint.expected_system
@@ -177,6 +185,12 @@ class MavRuntime:
                     raise RuntimeError("MAVLink runtime cleanup must complete before restart")
                 if self._running:
                     return
+            for endpoint_field, expected_identity in self._endpoint_peer_identity.items():
+                if getattr(self.client.endpoint, endpoint_field) != expected_identity:
+                    raise RuntimeError(
+                        "MAVLink endpoint peer identity changed after runtime creation; "
+                        "create a new runtime for the new peer"
+                    )
             started_stops: list[Callable[[], None]] = []
             try:
                 self.client.start()

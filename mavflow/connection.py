@@ -92,7 +92,9 @@ class MavConnection:
         self.connect()
 
     def connect(self) -> None:
-        state_generation: int
+        state_generation: int | None = None
+        deferred_errors: list[Exception] = []
+        failure: Exception | None = None
         with self._lifecycle_lock:
             if self._connection is not None:
                 return
@@ -101,41 +103,49 @@ class MavConnection:
                 try:
                     pending_close.close()
                 except Exception as exc:
-                    self._publish_error(exc)
-                    raise
-                self._pending_close = None
-            connection: Any | None = None
-            try:
-                connection = self._create_connection()
-                if self.endpoint.signing_key is not None:
-                    is_mavlink2 = getattr(connection, "mavlink20", None)
-                    if not callable(is_mavlink2) or not is_mavlink2():
-                        raise ValueError(
-                            "MAVLink signing requires a MAVLink 2 pymavlink dialect; "
-                            "set MAVLINK20=1 before pymavlink is imported"
-                        )
-                    setup_signing = getattr(connection, "setup_signing", None)
-                    if not callable(setup_signing):
-                        raise RuntimeError(
-                            "Configured MAVLink signing requires pymavlink setup_signing()"
-                        )
-                    setup_signing(self.endpoint.signing_key, sign_outgoing=True)
-                heartbeat = self._wait_vehicle_heartbeat(connection)
-                if heartbeat is None:
-                    raise TimeoutError("MAVLink heartbeat zaman aşımı")
-            except Exception as exc:
-                if connection is not None:
-                    try:
-                        connection.close()
-                    except Exception as close_error:
-                        self._pending_close = connection
-                        self._publish_error(close_error)
-                self._publish_error(exc)
-                raise
-            self._connection = connection
-            self._state_generation += 1
-            state_generation = self._state_generation
-        self._publish_connection_state(state_generation, True)
+                    deferred_errors.append(exc)
+                    failure = exc
+                else:
+                    self._pending_close = None
+            if failure is None:
+                connection: Any | None = None
+                try:
+                    connection = self._create_connection()
+                    if self.endpoint.signing_key is not None:
+                        is_mavlink2 = getattr(connection, "mavlink20", None)
+                        if not callable(is_mavlink2) or not is_mavlink2():
+                            raise ValueError(
+                                "MAVLink signing requires a MAVLink 2 pymavlink dialect; "
+                                "set MAVLINK20=1 before pymavlink is imported"
+                            )
+                        setup_signing = getattr(connection, "setup_signing", None)
+                        if not callable(setup_signing):
+                            raise RuntimeError(
+                                "Configured MAVLink signing requires pymavlink setup_signing()"
+                            )
+                        setup_signing(self.endpoint.signing_key, sign_outgoing=True)
+                    heartbeat = self._wait_vehicle_heartbeat(connection)
+                    if heartbeat is None:
+                        raise TimeoutError("MAVLink heartbeat zaman aşımı")
+                except Exception as exc:
+                    if connection is not None:
+                        try:
+                            connection.close()
+                        except Exception as close_error:
+                            self._pending_close = connection
+                            deferred_errors.append(close_error)
+                    deferred_errors.append(exc)
+                    failure = exc
+                else:
+                    self._connection = connection
+                    self._state_generation += 1
+                    state_generation = self._state_generation
+        for error in deferred_errors:
+            self._publish_error(error)
+        if failure is not None:
+            raise failure
+        if state_generation is not None:
+            self._publish_connection_state(state_generation, True)
 
     def _wait_vehicle_heartbeat(self, connection: Any) -> Any:
         """Wait for the autopilot without accepting companion or GCS heartbeats."""

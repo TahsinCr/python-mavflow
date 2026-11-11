@@ -199,6 +199,43 @@ class ApplicationCodecTests(unittest.TestCase):
                 b'{"type":"status","payload":{"value":NaN},"sent_at":1}',
             )
 
+    def test_invalid_json_does_not_reserve_the_completed_packet_id(self) -> None:
+        packet_id = 903
+        body = b'{"type":"status","payload":'
+        fragment = (
+            application_module._HEADER.pack(
+                application_module._MAGIC,
+                application_module._VERSION,
+                0,
+                packet_id,
+                0,
+                1,
+                len(body),
+                application_module.zlib.crc32(body) & 0xFFFFFFFF,
+            )
+            + body
+        )
+        assembler = MavApplicationAssembler()
+
+        with self.assertRaises(MavApplicationProtocolError):
+            assembler.accept(fragment, source_system=7, source_component=3)
+
+        valid = MavApplicationCodec.encode(
+            MavApplicationPacket("status", {"ready": True}, packet_id=packet_id)
+        )[0]
+        decoded = assembler.accept(valid, source_system=7, source_component=3)
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.payload, {"ready": True})
+
+    def test_codec_rejects_lone_surrogate_as_a_protocol_error(self) -> None:
+        packet = MavApplicationPacket("status", {"value": "\ud800"})
+
+        with self.assertRaises(MavApplicationProtocolError) as raised:
+            MavApplicationCodec.encode(packet)
+
+        self.assertIsInstance(raised.exception.__cause__, UnicodeEncodeError)
+
     def test_json_decoder_rejects_duplicate_keys_invalid_utf8_and_excessive_depth(self) -> None:
         malformed_bodies = (
             b'{"type":"status","payload":{},"sent_at":1,"sent_at":2}',
@@ -319,6 +356,26 @@ class ApplicationCodecTests(unittest.TestCase):
                 self.assertRaises(MavApplicationProtocolError),
             ):
                 MavApplicationCodec.decode_fragment(malformed)
+
+    def test_fragment_and_packet_decoders_enforce_public_size_limits(self) -> None:
+        packet = MavApplicationPacket("status", packet_id=1)
+        fragment = MavApplicationCodec.encode(packet)[0]
+        padded_to_limit = fragment + bytes(
+            application_module.V2_EXTENSION_PAYLOAD_SIZE - len(fragment)
+        )
+
+        self.assertEqual(
+            MavApplicationCodec.decode_fragment(padded_to_limit).packet_id,
+            1,
+        )
+        with self.assertRaisesRegex(MavApplicationProtocolError, "en fazla 249"):
+            MavApplicationCodec.decode_fragment(padded_to_limit + b"\x00")
+
+        with self.assertRaisesRegex(MavApplicationProtocolError, "çok büyük"):
+            MavApplicationCodec.decode_packet(
+                1,
+                bytes(application_module._MAX_PACKET_BYTES + 1),
+            )
 
     def test_completed_packet_deduplication_expires_and_is_process_local(self) -> None:
         fragment = MavApplicationCodec.encode(

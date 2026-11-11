@@ -227,7 +227,7 @@ class MavApplicationDispatcher:
                     {"error_type": "UnsupportedPacket"},
                 )
                 try:
-                    work_pool.submit(self._respond, packet, result)
+                    work_pool.submit(self._run_in_worker, self._respond, packet, result)
                 except Exception as exc:
                     self.errors.publish(exc)
             return False
@@ -248,11 +248,15 @@ class MavApplicationDispatcher:
         handler: MavApplicationHandler,
         generation: int,
     ) -> None:
+        self._run_in_worker(self._handle, packet, handler, generation)
+
+    def _run_in_worker(self, operation: Callable[..., None], *args: Any) -> None:
+        previous_active = bool(getattr(self._worker_context, "active", False))
         self._worker_context.active = True
         try:
-            self._handle(packet, handler, generation)
+            operation(*args)
         finally:
-            self._worker_context.active = False
+            self._worker_context.active = previous_active
 
     def _handle(
         self,
@@ -276,7 +280,7 @@ class MavApplicationDispatcher:
         except Exception as exc:
             error = exc
             result = MavApplicationResult.failure(
-                str(exc),
+                "Application handler failed",
                 {"error_type": exc.__class__.__name__},
             )
         if packet.expects_response:

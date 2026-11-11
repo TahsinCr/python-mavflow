@@ -139,7 +139,9 @@ class DispatcherContractTests(unittest.TestCase):
         dispatcher.errors.subscribe(errors.append)
 
         def raises(_packet: MavApplicationPacket) -> None:
-            raise ValueError("camera unavailable")
+            raise ValueError(
+                "Database connection failed: postgresql://user:password@internal-host/db"
+            )
 
         dispatcher.register("camera.failure", raises)
         dispatcher.register("camera.invalid", lambda _packet: 42)  # type: ignore[arg-type,return-value]
@@ -161,11 +163,14 @@ class DispatcherContractTests(unittest.TestCase):
                 self.assertTrue(peer.response_sent.wait(1.0))
                 result = handled[-1].result
                 self.assertFalse(result.accepted)
+                self.assertEqual(result.message, "Application handler failed")
                 self.assertEqual(peer.sent[-1][0], "system.error")
                 self.assertEqual(peer.sent[-1][1]["request_id"], 70 + index)
+                self.assertNotIn("postgresql://", repr(peer.sent[-1][1]))
 
         self.assertEqual(len(errors), 2)
         self.assertIsInstance(errors[0], ValueError)
+        self.assertIn("postgresql://", str(errors[0]))
         self.assertIsInstance(errors[1], TypeError)
 
     def test_oversized_handler_response_is_reported_as_a_failed_result(self) -> None:
@@ -301,6 +306,46 @@ class DispatcherContractTests(unittest.TestCase):
         )
         self.assertTrue(error_received.wait(1.0))
         self.assertEqual(errors, [peer.send_error])
+
+    def test_unsupported_response_worker_can_stop_its_dispatcher(self) -> None:
+        class StoppingPeer(_DispatchPeer):
+            def __init__(self) -> None:
+                super().__init__()
+                self.dispatcher: MavApplicationDispatcher | None = None
+                self.stop_errors: list[Exception] = []
+
+            def send(
+                self,
+                packet_type: str,
+                payload: Any,
+                **targets: int,
+            ) -> None:
+                assert self.dispatcher is not None
+                try:
+                    self.dispatcher.stop()
+                except Exception as exc:
+                    self.stop_errors.append(exc)
+                super().send(packet_type, payload, **targets)
+
+        peer = StoppingPeer()
+        dispatcher = MavApplicationDispatcher(peer)  # type: ignore[arg-type]
+        peer.dispatcher = dispatcher
+        dispatcher.start()
+
+        self.assertFalse(
+            dispatcher.dispatch(
+                MavApplicationPacket(
+                    "camera.unsupported",
+                    packet_id=91,
+                    expects_response=True,
+                )
+            )
+        )
+        self.assertTrue(peer.response_sent.wait(1.0))
+
+        self.assertEqual(peer.stop_errors, [])
+        self.assertEqual(peer.sent[0][0], "system.error")
+        self.assertIsNone(dispatcher._work_pool)
 
 
 if __name__ == "__main__":

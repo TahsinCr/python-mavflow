@@ -224,6 +224,12 @@ type filter (`str`, `list[str]`, or `set[str]`) and condition expression. Keep
 the router as the only reader while it is active; subscribe through
 `runtime.messages` for routed telemetry.
 
+When a runtime's default application peer is created from endpoint
+`expected_system` or `expected_component` IDs, those peer filters are fixed at
+runtime construction. Changing either ID on the stopped client makes the next
+`runtime.start()` fail explicitly; create a new runtime for the new peer.
+Transport-only endpoint changes that preserve those IDs remain valid.
+
 <a id="router"></a>
 ### One reader and the message router
 
@@ -481,18 +487,21 @@ complete example. The codec rejects malformed JSON, invalid checksums,
 unsupported protocol versions, and packets outside its configured bounds.
 
 The JSON body is limited to 16,632 bytes: 72 MAVLink `V2_EXTENSION` frames with
-231 application-data bytes per frame. A full packet occupies at least 72
-MAVLink 2 frames. On 8N1 serial links, the ideal wire-time lower bound is
-`72 × (261 [+ 13 signed]) × 10 / baud`; it excludes other traffic, scheduling,
-and device delays. The frame sizes use the [MAVLink serialization
-format](https://mavlink.io/en/guide/serialization.html) and its optional
-[13-byte signing block](https://mavlink.io/en/guide/message_signing.html):
+231 application-data bytes per frame. Each frame carries a 254-byte MAVLink
+payload (five routing/message-type bytes plus 249 extension bytes). With the
+10-byte MAVLink 2 header and 2-byte checksum, its maximum unsigned wire size is
+266 bytes; signing adds 13 bytes. On 8N1 serial links, the ideal wire-time lower
+bound is `72 × (266 [+ 13 signed]) × 10 / baud`; it excludes other traffic,
+scheduling, and device delays. Frame sizes follow the [MAVLink serialization
+format](https://mavlink.io/en/guide/serialization.html), the [`V2_EXTENSION`
+definition](https://mavlink.io/en/messages/common.html), and its
+optional [13-byte signing block](https://mavlink.io/en/guide/message_signing.html):
 
 | Baud | Unsigned | Signed |
 | ---: | ---: | ---: |
-| 9,600 | 19.58 s | 20.55 s |
-| 57,600 | 3.26 s | 3.43 s |
-| 115,200 | 1.63 s | 1.71 s |
+| 9,600 | 19.95 s | 20.93 s |
+| 57,600 | 3.33 s | 3.49 s |
+| 115,200 | 1.66 s | 1.74 s |
 
 Actual delivery takes longer. The default three-second request timeout is aimed
 at small control messages; set a deadline for the link speed and payload size.

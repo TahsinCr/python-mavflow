@@ -223,6 +223,13 @@ filtresini (`str`, `list[str]` veya `set[str]`) ve condition ifadesini doğrudan
 iletir. Router çalışırken tek okuyucu olarak kalmalıdır; yönlendirilmiş telemetri
 için `runtime.messages` kanalını kullanın.
 
+Runtime'ın varsayılan application peer'ı endpoint'teki `expected_system` veya
+`expected_component` kimliklerinden oluşturulduysa bu filtreler runtime
+kurulurken sabitlenir. Durdurulmuş client üzerinde bu kimliklerden birini
+değiştirmek sonraki `runtime.start()` çağrısında açıkça reddedilir; yeni peer
+için yeni bir runtime oluşturun. Bu kimlikleri koruyan transport değişiklikleri
+uygulanabilir.
+
 <a id="router"></a>
 ### Tek okuyucu ve mesaj router'ı
 
@@ -480,19 +487,22 @@ dosyasına bakın. Codec hatalı JSON, geçersiz checksum, desteklenmeyen protok
 sürümü ve yapılandırılan sınırları aşan paketleri reddeder.
 
 JSON gövdesi en fazla 16.632 byte olabilir: her biri 231 uygulama verisi byte'ı
-taşıyan 72 MAVLink `V2_EXTENSION` frame'i. Tam boy bir paket en az 72 MAVLink 2
-frame'i kullanır. 8N1 seri bağlantıda ideal alt sınır
-`72 × (261 [+ imzalıysa 13]) × 10 / baud` olur; bu hesap diğer trafiği,
+taşıyan 72 MAVLink `V2_EXTENSION` frame'i. Her frame 254 byte MAVLink payload'u
+taşır (beş routing/message-type byte'ı ve 249 extension byte'ı). 10 byte MAVLink
+2 başlığı ve 2 byte checksum ile imzasız en büyük wire boyutu 266 byte olur;
+imza 13 byte ekler. 8N1 seri bağlantıda ideal alt sınır
+`72 × (266 [+ imzalıysa 13]) × 10 / baud` olur; bu hesap diğer trafiği,
 zamanlamayı ve cihaz gecikmesini içermez. Frame boyutları [MAVLink serileştirme
-formatını](https://mavlink.io/en/guide/serialization.html) ve isteğe bağlı
-[13 byte'lık imza bloğunu](https://mavlink.io/en/guide/message_signing.html)
-esas alır:
+formatına](https://mavlink.io/en/guide/serialization.html),
+[`V2_EXTENSION` tanımına](https://mavlink.io/en/messages/common.html)
+ve isteğe bağlı [13 byte'lık imza bloğuna](https://mavlink.io/en/guide/message_signing.html)
+göre hesaplanır:
 
 | Baud | İmzasız | İmzalı |
 | ---: | ---: | ---: |
-| 9.600 | 19,58 sn | 20,55 sn |
-| 57.600 | 3,26 sn | 3,43 sn |
-| 115.200 | 1,63 sn | 1,71 sn |
+| 9.600 | 19,95 sn | 20,93 sn |
+| 57.600 | 3,33 sn | 3,49 sn |
+| 115.200 | 1,66 sn | 1,74 sn |
 
 Gerçek aktarım daha uzun sürer. Varsayılan üç saniyelik request timeout'u küçük
 kontrol mesajlarını hedefler; bağlantı hızı ve payload boyutuna göre süre seçin.

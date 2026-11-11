@@ -94,6 +94,56 @@ class RouterLifecycleTests(unittest.TestCase):
         self.assertEqual(connection.stop_count, 2)
         self.assertFalse(router.running)
 
+    def test_router_rolls_back_when_receive_thread_cannot_start(self) -> None:
+        connection = _RestartableConnection()
+        router = MavMessageRouter(connection, poll_timeout=0.01)  # type: ignore[arg-type]
+
+        with patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("thread start failed")
+        ):
+            with self.assertRaisesRegex(RuntimeError, "thread start failed"):
+                router.start()
+
+        self.assertFalse(router.running)
+        self.assertIsNone(router._thread)
+        self.assertFalse(router._cleanup_pending)
+        self.assertEqual(connection.start_count, 1)
+        self.assertEqual(connection.stop_count, 1)
+
+        router.stop()
+        self.assertEqual(connection.stop_count, 2)
+
+    def test_router_retries_connection_cleanup_after_thread_start_failure(self) -> None:
+        class RetryStopConnection(_RestartableConnection):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stop_attempts = 0
+
+            def stop(self) -> None:
+                self.stop_attempts += 1
+                if self.stop_attempts == 1:
+                    raise OSError("initial cleanup failed")
+                super().stop()
+
+        connection = RetryStopConnection()
+        router = MavMessageRouter(connection, poll_timeout=0.01)  # type: ignore[arg-type]
+
+        with patch.object(
+            threading.Thread, "start", side_effect=RuntimeError("thread start failed")
+        ):
+            with self.assertRaisesRegex(OSError, "initial cleanup failed") as raised:
+                router.start()
+
+        self.assertIsInstance(raised.exception.__cause__, RuntimeError)
+        self.assertFalse(router.running)
+        self.assertIsNone(router._thread)
+        self.assertTrue(router._cleanup_pending)
+
+        router.stop()
+
+        self.assertFalse(router._cleanup_pending)
+        self.assertEqual(connection.stop_count, 1)
+
     def test_router_rejects_stop_from_its_synchronous_message_callback(self) -> None:
         connection = _RestartableConnection()
         router = MavMessageRouter(
@@ -827,6 +877,21 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], TimeoutError)
         peer.stop()
+
+    def test_response_request_id_accepts_only_positive_uint32_integers(self) -> None:
+        for value, expected in (
+            (42, 42),
+            (0xFFFFFFFF, 0xFFFFFFFF),
+            (42.9, None),
+            ("42", None),
+            (True, None),
+            (0, None),
+            (-1, None),
+            (0x1_0000_0000, None),
+        ):
+            with self.subTest(value=value):
+                packet = MavApplicationPacket("system.ack", {"request_id": value})
+                self.assertEqual(MavApplicationPeer._response_request_id(packet), expected)
 
 
 class _PeerStub:

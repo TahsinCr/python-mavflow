@@ -108,6 +108,7 @@ class MavMessageRouter:
             )
 
     def start(self) -> None:
+        start_error: Exception | None = None
         with self._lifecycle_lock:
             if self._stopping:
                 raise RuntimeError("MAVLink router hâlâ durduruluyor")
@@ -132,7 +133,31 @@ class MavMessageRouter:
                 name="MavRouter",
                 daemon=True,
             )
-            self._thread.start()
+            try:
+                self._thread.start()
+            except Exception as exc:
+                start_error = exc
+                self._thread = None
+                self._stop_event.set()
+                with self._condition:
+                    self._running = False
+                    self._started_monotonic = None
+                    self._condition.notify_all()
+                self._cleanup_pending = True
+                self._stopping = True
+        if start_error is not None:
+            cleanup_error: Exception | None = None
+            try:
+                self.connection.stop()
+            except Exception as exc:
+                cleanup_error = exc
+            finally:
+                with self._lifecycle_lock:
+                    self._cleanup_pending = cleanup_error is not None
+                    self._stopping = False
+            if cleanup_error is not None:
+                raise cleanup_error from start_error
+            raise start_error.with_traceback(start_error.__traceback__)
 
     def stop(self) -> None:
         with self._lifecycle_lock:

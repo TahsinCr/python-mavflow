@@ -274,6 +274,10 @@ class MavApplicationCodec:
 
     @classmethod
     def decode_fragment(cls, payload: bytes | bytearray | list[int] | tuple[int, ...]) -> _Fragment:
+        if len(payload) > V2_EXTENSION_PAYLOAD_SIZE:
+            raise MavApplicationProtocolError(
+                f"Uygulama fragmenti en fazla {V2_EXTENSION_PAYLOAD_SIZE} bayt olabilir"
+            )
         raw = bytes(payload)
         if len(raw) < _HEADER.size:
             raise MavApplicationProtocolError("Uygulama fragment başlığı eksik")
@@ -315,6 +319,10 @@ class MavApplicationCodec:
         source_system: int | None = None,
         source_component: int | None = None,
     ) -> MavApplicationPacket:
+        if len(body) > _MAX_PACKET_BYTES:
+            raise MavApplicationProtocolError(
+                f"Uygulama paketi çok büyük: {len(body)} > {_MAX_PACKET_BYTES} bayt"
+            )
         try:
             json_body = body.decode("utf-8")
             _validate_json_depth(json_body)
@@ -476,15 +484,16 @@ class MavApplicationAssembler:
             self._discard_assembly(key)
             if zlib.crc32(body) & 0xFFFFFFFF != assembly.checksum:
                 raise MavApplicationProtocolError("Uygulama paketi CRC doğrulamasını geçemedi")
+            packet = MavApplicationCodec.decode_packet(
+                fragment.packet_id,
+                body,
+                source_system=source_system,
+                source_component=source_component,
+            )
             self._completed[key] = now
             while len(self._completed) > self._max_completed_packets:
                 self._completed.pop(next(iter(self._completed)))
-        return MavApplicationCodec.decode_packet(
-            fragment.packet_id,
-            body,
-            source_system=source_system,
-            source_component=source_component,
-        )
+            return packet
 
     def clear(self) -> None:
         with self._lock:

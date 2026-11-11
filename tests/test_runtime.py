@@ -370,6 +370,32 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertEqual(runtime.channel._source_components, frozenset({3}))
         runtime.close()
 
+    def test_runtime_rejects_changed_endpoint_identity_bound_to_its_default_peer(self) -> None:
+        client = MavClient(
+            MavEndpoint.udp(
+                "127.0.0.1",
+                14550,
+                expected_system=7,
+                expected_component=3,
+            )
+        )
+        runtime = MavRuntime(client=client, application_role="vehicle")
+        client.configure_endpoint(
+            MavEndpoint.udp(
+                "127.0.0.1",
+                14551,
+                expected_system=8,
+                expected_component=4,
+            )
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "create a new runtime"):
+            runtime.start()
+
+        self.assertFalse(runtime.running)
+        self.assertFalse(client.is_connected)
+        runtime.close()
+
     def test_application_role_accepts_explicit_peer_and_source_identity(self) -> None:
         runtime = MavRuntime(
             client=FakeClient([]),  # type: ignore[arg-type]

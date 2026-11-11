@@ -707,7 +707,6 @@ class MavApplicationPeer:
     @staticmethod
     def _response_request_id(packet: MavApplicationPacket) -> int | None:
         value = packet.payload.get("request_id")
-        try:
-            return int(value) if value is not None else None
-        except (TypeError, ValueError):
+        if type(value) is not int or not 0 < value <= 0xFFFFFFFF:
             return None
+        return value
