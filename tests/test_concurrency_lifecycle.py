@@ -89,24 +89,29 @@ class _ClientConnection(_RestartableConnection):
 
 
 class RouterLifecycleTests(unittest.TestCase):
-    def test_client_rejects_stop_from_connection_start_callback(self) -> None:
+    def test_client_rejects_lifecycle_reentry_from_connection_start_callback(self) -> None:
         connection = _ClientConnection()
         client = MavClient(connection=connection)  # type: ignore[arg-type]
         callback_errors: list[Exception] = []
 
-        def stop_during_connect(connected: bool) -> None:
+        def reenter_during_connect(connected: bool) -> None:
             if connected:
-                try:
-                    client.stop()
-                except Exception as exc:
-                    callback_errors.append(exc)
+                for operation in ("start", "stop", "configure_endpoint"):
+                    try:
+                        if operation == "configure_endpoint":
+                            client.configure_endpoint(MavEndpoint.tcp("localhost", 5760))
+                        else:
+                            getattr(client, operation)()
+                    except Exception as exc:
+                        callback_errors.append(exc)
 
-        connection.connection_changed.subscribe(stop_during_connect)
+        connection.connection_changed.subscribe(reenter_during_connect)
         client.start()
         self.addCleanup(client.stop)
 
-        self.assertEqual(len(callback_errors), 1)
-        self.assertRegex(str(callback_errors[0]), "startup callback")
+        self.assertEqual(len(callback_errors), 3)
+        for error in callback_errors:
+            self.assertRegex(str(error), "startup callback")
         self.assertTrue(connection.is_connected)
         self.assertTrue(client.router.running)
 
