@@ -69,6 +69,33 @@ The codec payload-size/shape smoke matrix covered 128, 512, 2,048, 8,192, and
 reported the requested workload and clean source revision. These used `--fast`
 to validate argument forwarding and metadata; they are not timing evidence.
 
+## Seventh audit codec comparison
+
+The following normal pyperf runs compare the pre-audit `b34f209` source with
+the final seventh-audit source `3b9d3d9`. Each baseline/current pair used the
+same host, interpreter, payload, shape, and `--processes 8 --values 8
+--min-time 0.1` settings. The payload is encoded into MAVLink fragments and
+reassembled once per operation.
+
+| Payload | `b34f209` baseline mean ± standard deviation | `3b9d3d9` final mean ± standard deviation | `compare_to` observation |
+| --- | ---: | ---: | ---: |
+| 2,048-byte flat | 89.5 ± 4.6 µs | 87.3 ± 1.2 µs | 1.02× faster |
+| 16,000-byte flat | 362 ± 6 µs | 370 ± 9 µs | 1.02× slower |
+| 16,000-byte brackets | 1.48 ± 0.04 ms | 1.46 ± 0.03 ms | 1.01× faster |
+| 16,000-byte nested | 541 ± 9 µs | 547 ± 5 µs | 1.01× slower |
+
+The baseline source fingerprint is
+`5636e578dd3c23ad5f6a6905d5c183d8b54bca90633ff5093646c723e8ac7f9a`; the final
+source fingerprint is
+`1b2e33b55305aa8032b457d3d2b1680cde443bd13c0a9f269741d91f19447e68`. Both
+reports record clean source trees. The host is CPython 3.14.9, pyperf 2.11.0,
+Arch Linux 7.2.14, and an Intel Core i7-12700H. Pyperf reported instability in
+six of the eight suites, and the observed differences are at most 2%; these
+measurements do not establish a performance gain or regression. The Unicode
+validation fast path remains a small code-path optimization, not a measured
+performance claim. Paired raw suites are preserved in
+[`archive/m7-audit-20261111/`](archive/m7-audit-20261111/).
+
 The earlier six suites are also retained under
 [`archive/pre-m5-audit-1ccd2b5/`](archive/pre-m5-audit-1ccd2b5/). They were
 generated from revision `1ccd2b5d1120c7aa917c3d50ba301c15e2c7a8b7` with source
