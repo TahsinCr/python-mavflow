@@ -166,6 +166,46 @@ class MavClientTests(unittest.TestCase):
         self.assertIs(client.endpoint, self.endpoint)
         client.stop()
 
+    def test_lifecycle_calls_from_router_thread_fail_before_client_lock(self) -> None:
+        operations = (
+            ("start", lambda: self.client.start()),
+            ("stop", lambda: self.client.stop()),
+            (
+                "configure_endpoint",
+                lambda: self.client.configure_endpoint(MavEndpoint.tcp("localhost", 5760)),
+            ),
+        )
+        for operation, call in operations:
+            with self.subTest(operation=operation):
+                completed = threading.Event()
+                errors: list[Exception] = []
+
+                def invoke_from_router() -> None:
+                    self.router._thread = threading.current_thread()
+                    try:
+                        call()
+                    except Exception as exc:
+                        errors.append(exc)
+                    finally:
+                        completed.set()
+
+                self.client._lifecycle_lock.acquire()
+                thread = threading.Thread(target=invoke_from_router, daemon=True)
+                try:
+                    thread.start()
+                    completed_before_unlock = completed.wait(0.1)
+                finally:
+                    self.client._lifecycle_lock.release()
+                thread.join(1.0)
+                self.router._thread = None
+
+                self.assertTrue(completed_before_unlock)
+                self.assertFalse(thread.is_alive())
+                self.assertEqual(len(errors), 1)
+                self.assertRegex(str(errors[0]), "router receive thread")
+                self.router.running = False
+                self.connection.endpoint = self.endpoint
+
 
 if __name__ == "__main__":
     unittest.main()

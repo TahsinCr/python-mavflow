@@ -246,16 +246,14 @@ submit expensive work to a bounded worker. `MavClient` and `MavRuntime` expose
 the same message bus directly as `messages` and the native EventFlow engine as
 `events`.
 
-Do not call blocking `runtime.stop()` or `runtime.close()` from a message
-callback. The runtime rejects the operation before tearing down components
-because the router cannot join its own receive thread; schedule lifecycle
-changes from another task or thread. The same rule applies to the peer monitor
-thread. A dispatcher worker handler also cannot call runtime shutdown: a
-concurrent shutdown waits for active handlers to return. A synchronous
-`peer.changed` callback during runtime startup cannot reenter `start()`,
-`stop()`, or `close()`, and a `connection_changed(True)` callback cannot call
-`MavClient.stop()` or runtime shutdown while the client is starting. Defer
-lifecycle changes until the callback and startup transition return.
+Do not call runtime `start()`, `stop()`, `reconnect()`, or `close()` from a
+router reader, peer monitor, dispatcher worker, or managed startup callback.
+These calls are rejected before the runtime lifecycle lock is acquired, because
+shutdown can wait for the callback's thread. Direct client `start()`, `stop()`,
+and `configure_endpoint()` calls are likewise rejected from its reader or
+connection-start callback. A peer monitor callback cannot call peer `start()`
+or `stop()`. Change lifecycle from another task or thread after the callback
+returns; endpoint configuration is supported only while the client is stopped.
 
 <a id="filtering"></a>
 ### Filtering and message history

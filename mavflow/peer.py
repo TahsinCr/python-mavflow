@@ -140,6 +140,8 @@ class MavApplicationPeer:
             return self._state.alive
 
     def start(self) -> None:
+        if self._monitor_thread is threading.current_thread():
+            raise RuntimeError("Application peer cannot start from its monitor thread")
         with self._lifecycle_lock:
             with self._lock:
                 if self._state.running:

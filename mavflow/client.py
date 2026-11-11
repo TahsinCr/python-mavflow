@@ -59,10 +59,9 @@ class MavClient:
         return self.router.messages
 
     def start(self) -> None:
+        self._reject_managed_thread_lifecycle("start")
         with self._lifecycle_lock:
             current_thread = threading.current_thread()
-            if self._starting_thread is current_thread:
-                raise RuntimeError("MAVLink client lifecycle cannot reenter its startup callback")
             self._starting_thread = current_thread
             try:
                 self.router.start()
@@ -70,17 +69,26 @@ class MavClient:
                 self._starting_thread = None
 
     def stop(self) -> None:
-        if self._starting_thread is threading.current_thread():
-            raise RuntimeError("MAVLink client cannot stop from a connection startup callback")
+        self._reject_managed_thread_lifecycle("stop")
         with self._lifecycle_lock:
             self.router.stop()
 
     def configure_endpoint(self, endpoint: MavEndpoint) -> None:
         """Change transport settings of a closed client for its next connection."""
+        self._reject_managed_thread_lifecycle("configure its endpoint")
         with self._lifecycle_lock:
             if self.router.running or self.connection.is_connected:
                 raise RuntimeError("Çalışan MAVLink istemcisi yeniden yapılandırılamaz")
             self.connection.endpoint = endpoint
+
+    def _reject_managed_thread_lifecycle(self, operation: str) -> None:
+        current_thread = threading.current_thread()
+        if self._starting_thread is current_thread:
+            raise RuntimeError(
+                f"MAVLink client cannot {operation} from a connection startup callback"
+            )
+        if getattr(self.router, "_thread", None) is current_thread:
+            raise RuntimeError(f"MAVLink client cannot {operation} from its router receive thread")
 
     close = stop
 

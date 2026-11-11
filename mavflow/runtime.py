@@ -178,14 +178,11 @@ class MavRuntime:
     def start(self) -> None:
         """Start transport, application peer, and dispatcher in safe order."""
 
+        self._reject_managed_thread_lifecycle()
         with self._lifecycle_lock:
             with self._lock:
                 if self._closed:
                     raise RuntimeError("MAVLink runtime is closed")
-                if self._starting_thread is threading.current_thread():
-                    raise RuntimeError(
-                        "MAVLink runtime lifecycle cannot reenter its startup callback"
-                    )
                 if self._cleanup_pending:
                     raise RuntimeError("MAVLink runtime cleanup must complete before restart")
                 if self._running:
@@ -230,19 +227,23 @@ class MavRuntime:
     def _reject_managed_thread_lifecycle(self) -> None:
         current_thread = threading.current_thread()
         if self._starting_thread is current_thread:
-            raise RuntimeError("MAVLink runtime cannot stop or close from a startup callback")
+            raise RuntimeError("MAVLink runtime lifecycle is not allowed from a startup callback")
         if getattr(self.client, "_starting_thread", None) is current_thread:
             raise RuntimeError(
-                "MAVLink runtime cannot stop or close from a client startup callback"
+                "MAVLink runtime lifecycle is not allowed from a client startup callback"
             )
         if getattr(self.router, "_thread", None) is current_thread:
-            raise RuntimeError("MAVLink runtime cannot stop from its router receive thread")
+            raise RuntimeError(
+                "MAVLink runtime lifecycle is not allowed from its router receive thread"
+            )
         if getattr(self.peer, "_monitor_thread", None) is current_thread:
-            raise RuntimeError("MAVLink runtime cannot stop from its peer monitor thread")
+            raise RuntimeError(
+                "MAVLink runtime lifecycle is not allowed from its peer monitor thread"
+            )
         worker_context = getattr(self.dispatcher, "_worker_context", None)
         if worker_context is not None and getattr(worker_context, "active", False):
             raise RuntimeError(
-                "MAVLink runtime cannot stop or close from a dispatcher worker thread"
+                "MAVLink runtime lifecycle is not allowed from a dispatcher worker thread"
             )
 
     def stop(self) -> None:
@@ -289,6 +290,7 @@ class MavRuntime:
                 self._closed = True
 
     def reconnect(self) -> None:
+        self._reject_managed_thread_lifecycle()
         with self._lifecycle_lock:
             self.stop()
             self.start()

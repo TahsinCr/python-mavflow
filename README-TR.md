@@ -245,16 +245,15 @@ Router callback'leri senkron teslimat sırasında çalışır; kısa tutun veya 
 işleri sınırlı bir worker'a gönderin. `MavClient` ve `MavRuntime`, aynı native
 EventFlow bus'ını `messages`, engine'i `events` olarak doğrudan sunar.
 
-Mesaj callback'i içinden bloklayan `runtime.stop()` veya `runtime.close()`
-çağırmayın. Router kendi receive thread'ini join edemediği için runtime
-bileşenleri kapatmaya başlamadan işlemi reddeder; yaşam döngüsü değişikliklerini
-başka bir task veya thread'den başlatın. Aynı kural peer monitor thread'i için
-de geçerlidir. Dispatcher worker'ında çalışan handler da runtime kapatamaz;
-eşzamanlı kapatma aktif handler'ların bitmesini bekler. Runtime başlatılırken
-senkron `peer.changed` callback'i içinden `start()`, `stop()` veya `close()`;
-client başlatılırken `connection_changed(True)` callback'i içinden
-`MavClient.stop()` veya runtime kapatma işlemi yeniden çağrılamaz. Yaşam döngüsü
-değişikliklerini callback ve başlangıç geçişi tamamlandıktan sonra başlatın.
+Router reader, peer monitor, dispatcher worker veya yönetilen bir başlangıç
+callback'i içinden runtime `start()`, `stop()`, `reconnect()` ya da `close()`
+çağırmayın. Kapatma callback thread'inin bitmesini bekleyebildiği için bu
+çağrılar runtime lifecycle kilidi alınmadan reddedilir. Doğrudan client
+`start()`, `stop()` ve `configure_endpoint()` çağrıları da reader veya bağlantı
+başlangıç callback'i içinden reddedilir. Peer monitor callback'i peer
+`start()`/`stop()` çağrısı yapamaz. Yaşam döngüsünü callback döndükten sonra
+başka bir task veya thread'den yönetin; endpoint yalnızca durmuş client'ta
+yapılandırılabilir.
 
 <a id="filtering"></a>
 ### Filtreleme ve mesaj geçmişi

@@ -480,6 +480,74 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertFalse(channel.started)
         self.assertFalse(peer._channel_cleanup_pending)
 
+    def test_monitor_callback_cannot_restart_peer_while_external_stop_waits(self) -> None:
+        class SignalingChannel(_ChannelStub):
+            def __init__(self) -> None:
+                super().__init__()
+                self.stop_entered = threading.Event()
+
+            def stop(self) -> None:
+                super().stop()
+                self.stop_entered.set()
+
+        channel = SignalingChannel()
+        transport = {"ready": False}
+        peer = self._peer(
+            channel,
+            heartbeat_interval=0.01,
+            transport_available=lambda: transport["ready"],
+        )
+        monitor_callback_entered = threading.Event()
+        reentry_attempted = threading.Event()
+        allow_reentry = threading.Event()
+        callback_errors: list[Exception] = []
+        stop_errors: list[Exception] = []
+        stop_completed = threading.Event()
+
+        def restart_from_monitor(_state: Any) -> None:
+            if threading.current_thread() is threading.main_thread() or reentry_attempted.is_set():
+                return
+            reentry_attempted.set()
+            monitor_callback_entered.set()
+            if not allow_reentry.wait(1.0):
+                callback_errors.append(TimeoutError("test did not release peer monitor callback"))
+                return
+            try:
+                peer.start()
+            except Exception as exc:
+                callback_errors.append(exc)
+
+        peer.changed.subscribe(restart_from_monitor)
+        peer.start()
+        transport["ready"] = True
+        peer._wake.set()
+        self.assertTrue(monitor_callback_entered.wait(1.0))
+
+        def stop_peer() -> None:
+            try:
+                peer.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+            finally:
+                stop_completed.set()
+
+        stopper = threading.Thread(target=stop_peer, daemon=True)
+        stopper.start()
+        self.assertTrue(channel.stop_entered.wait(1.0))
+        allow_reentry.set()
+        stopper.join(1.0)
+        monitor_thread = peer._monitor_thread
+        if monitor_thread is not None:
+            monitor_thread.join(1.0)
+
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(stop_completed.is_set())
+        self.assertEqual(stop_errors, [])
+        self.assertEqual(len(callback_errors), 1)
+        self.assertRegex(str(callback_errors[0]), "monitor thread")
+        self.assertFalse(peer.running)
+        self.assertIsNone(peer._monitor_thread)
+
     def test_stop_wakes_pending_request_and_prevents_later_packets(self) -> None:
         channel = _ChannelStub()
         peer = self._peer(channel)
