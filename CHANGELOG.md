@@ -6,9 +6,11 @@ All notable changes to Mavflow are documented here.
 
 ### Fixed
 
-- Reject runtime shutdown from dispatcher, router, and peer-monitor callback
-  threads before acquiring the runtime lifecycle lock, preventing cross-thread
-  shutdown deadlocks.
+- Reject runtime `start()` and `reconnect()` calls from managed dispatcher,
+  reader, monitor, and startup threads before taking the runtime lifecycle lock;
+  apply the same early guard to direct client and peer lifecycle entry points.
+- Reject remote-log text fields that cannot be encoded as UTF-8 when the record
+  is created.
 - Serialize runtime peer-identity validation with client startup and reject
   reentrant client lifecycle calls from a connection startup callback.
 - Reject decoded JSON strings containing unpaired Unicode surrogates so decode

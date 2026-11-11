@@ -668,6 +668,12 @@ class RemoteLogTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "protocol version"):
             MavRemoteLogBatch.from_payload({"version": 99, "session": "session-001", "records": []})
 
+    def test_remote_log_rejects_text_that_cannot_be_encoded_as_utf8(self) -> None:
+        self.assertEqual(self._record(message="Uçuş hazır").message, "Uçuş hazır")
+        for field_name in ("source", "action", "message", "device_id", "correlation_id"):
+            with self.subTest(field=field_name), self.assertRaisesRegex(ValueError, field_name):
+                self._record(**{field_name: "invalid\ud800text"})
+
     def test_remote_log_payload_shapes_and_optional_text_are_normalized(self) -> None:
         record = MavRemoteLogRecord.from_payload(
             {

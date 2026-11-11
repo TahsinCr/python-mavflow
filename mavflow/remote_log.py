@@ -119,6 +119,19 @@ class MavRemoteLogRecord:
             )
         device_id = _optional_text(self.device_id, maximum=96)
         correlation_id = _optional_text(self.correlation_id, maximum=128)
+        for field_name, value in (
+            ("source", source),
+            ("action", action),
+            ("message", message),
+            ("device_id", device_id),
+            ("correlation_id", correlation_id),
+        ):
+            if value is None:
+                continue
+            try:
+                value.encode("utf-8")
+            except UnicodeEncodeError as exc:
+                raise ValueError(f"Remote log {field_name} must be valid UTF-8 text") from exc
         object.__setattr__(self, "sequence", sequence)
         object.__setattr__(self, "source", source)
         object.__setattr__(self, "action", action)
