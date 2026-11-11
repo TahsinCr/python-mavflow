@@ -16,8 +16,11 @@ python -m benchmarks.benchmark_codec --output codec-run.json
 ```
 
 Use `--fast` only for CI smoke checks. Inspect a suite with
-`python -m pyperf show --metadata --stats router-run.json`. Compare results only
-when source fingerprints, interpreter, platform, and workload metadata match:
+`python -m pyperf show --metadata --stats router-run.json`. For repeat runs of
+the same code, require matching source fingerprints, revision/dirty state,
+interpreter, platform, and workload metadata. For before/after code comparisons,
+the source fingerprints and revisions should differ; match the interpreter,
+platform, and workload, and report metadata for both revisions:
 
 ```bash
 python -m pyperf compare_to --table benchmarks/results/router.json router-run.json
