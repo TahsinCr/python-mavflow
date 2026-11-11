@@ -190,16 +190,18 @@ class MavRuntime:
                     raise RuntimeError("MAVLink runtime cleanup must complete before restart")
                 if self._running:
                     return
-            for endpoint_field, expected_identity in self._endpoint_peer_identity.items():
-                if getattr(self.client.endpoint, endpoint_field) != expected_identity:
-                    raise RuntimeError(
-                        "MAVLink endpoint peer identity changed after runtime creation; "
-                        "create a new runtime for the new peer"
-                    )
             self._starting_thread = threading.current_thread()
-            cleanup_callbacks: list[Callable[[], None]] = [self.client.stop]
+            cleanup_callbacks: list[Callable[[], None]] = []
             try:
-                self.client.start()
+                with self.client._lifecycle_lock:
+                    for endpoint_field, expected_identity in self._endpoint_peer_identity.items():
+                        if getattr(self.client.endpoint, endpoint_field) != expected_identity:
+                            raise RuntimeError(
+                                "MAVLink endpoint peer identity changed after runtime creation; "
+                                "create a new runtime for the new peer"
+                            )
+                    cleanup_callbacks.append(self.client.stop)
+                    self.client.start()
                 if self.peer is not None:
                     self.peer.start()
                     cleanup_callbacks.append(self.peer.stop)
@@ -225,17 +227,29 @@ class MavRuntime:
             finally:
                 self._starting_thread = None
 
-    def stop(self) -> None:
-        """Stop every owned layer in reverse order and preserve all errors."""
+    def _reject_managed_thread_lifecycle(self) -> None:
+        current_thread = threading.current_thread()
+        if self._starting_thread is current_thread:
+            raise RuntimeError("MAVLink runtime cannot stop or close from a startup callback")
+        if getattr(self.client, "_starting_thread", None) is current_thread:
+            raise RuntimeError(
+                "MAVLink runtime cannot stop or close from a client startup callback"
+            )
+        if getattr(self.router, "_thread", None) is current_thread:
+            raise RuntimeError("MAVLink runtime cannot stop from its router receive thread")
+        if getattr(self.peer, "_monitor_thread", None) is current_thread:
+            raise RuntimeError("MAVLink runtime cannot stop from its peer monitor thread")
+        worker_context = getattr(self.dispatcher, "_worker_context", None)
+        if worker_context is not None and getattr(worker_context, "active", False):
+            raise RuntimeError(
+                "MAVLink runtime cannot stop or close from a dispatcher worker thread"
+            )
 
+    def stop(self) -> None:
+        """Stop owned layers; lifecycle calls from managed callbacks are rejected."""
+
+        self._reject_managed_thread_lifecycle()
         with self._lifecycle_lock:
-            current_thread = threading.current_thread()
-            if self._starting_thread is current_thread:
-                raise RuntimeError("MAVLink runtime cannot stop or close from a startup callback")
-            if getattr(self.router, "_thread", None) is current_thread:
-                raise RuntimeError("MAVLink runtime cannot stop from its router receive thread")
-            if getattr(self.peer, "_monitor_thread", None) is current_thread:
-                raise RuntimeError("MAVLink runtime cannot stop from its peer monitor thread")
             with self._lock:
                 if not self._running and not self._cleanup_pending:
                     return
@@ -264,6 +278,7 @@ class MavRuntime:
     def close(self) -> None:
         """Stop owned services and close the EventFlow channel engine."""
 
+        self._reject_managed_thread_lifecycle()
         with self._lifecycle_lock:
             with self._lock:
                 if self._closed:

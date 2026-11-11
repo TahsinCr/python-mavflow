@@ -236,6 +236,33 @@ class ApplicationCodecTests(unittest.TestCase):
 
         self.assertIsInstance(raised.exception.__cause__, UnicodeEncodeError)
 
+    def test_json_decoder_rejects_unpaired_surrogates_in_all_strings(self) -> None:
+        malformed_bodies = (
+            rb'{"type":"\ud800","payload":{}}',
+            rb'{"type":"status","payload":{"\ud800":"value"}}',
+            rb'{"type":"status","payload":{"value":"\ud800"}}',
+        )
+        for body in malformed_bodies:
+            with (
+                self.subTest(body=body),
+                self.assertRaisesRegex(MavApplicationProtocolError, "surrogate"),
+            ):
+                MavApplicationCodec.decode_packet(1, body)
+
+    def test_json_decoder_accepts_valid_surrogate_pairs_and_reencodes_them(self) -> None:
+        packet = MavApplicationCodec.decode_packet(
+            1,
+            rb'{"type":"status","payload":{"value":"\ud83d\ude80"},"sent_at":1.0,"reply":false}',
+        )
+
+        assembler = MavApplicationAssembler()
+        decoded = None
+        for fragment in MavApplicationCodec.encode(packet):
+            decoded = assembler.accept(fragment)
+
+        self.assertIsNotNone(decoded)
+        self.assertEqual(decoded.payload["value"], "🚀")
+
     def test_json_decoder_rejects_duplicate_keys_invalid_utf8_and_excessive_depth(self) -> None:
         malformed_bodies = (
             b'{"type":"status","payload":{},"sent_at":1,"sent_at":2}',

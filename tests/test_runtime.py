@@ -50,6 +50,7 @@ class FakeClient:
         self.events.add("mavlink.messages", self.router.messages)
         self.events.add("mavlink.connection.errors", self.connection.errors)
         self.events.add("mavlink.router.errors", self.router.errors)
+        self._lifecycle_lock = threading.RLock()
         self.is_connected = False
         self.calls = calls
         self.sent: list[Any] = []
@@ -106,6 +107,7 @@ class FakeDispatcher:
         self.unhandled = EventBus[Any]()
         self.errors = EventBus[Exception]()
         self.handlers: dict[str, Any] = {}
+        self._worker_context = threading.local()
 
     def start(self) -> None:
         self.calls.append("dispatcher:start")
@@ -444,6 +446,60 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertFalse(client.is_connected)
         runtime.close()
 
+    def test_runtime_endpoint_identity_check_is_atomic_with_client_start(self) -> None:
+        client = MavClient(MavEndpoint(expected_system=7, expected_component=3))
+        runtime = MavRuntime(client=client, application_role="vehicle")
+        start_entered = threading.Event()
+        release_start = threading.Event()
+        configure_started = threading.Event()
+        configure_finished = threading.Event()
+        start_errors: list[Exception] = []
+        configure_errors: list[Exception] = []
+
+        def blocking_client_start() -> None:
+            start_entered.set()
+            if not release_start.wait(1.0):
+                raise TimeoutError("test did not release client startup")
+            runtime.router._running = True
+
+        def start_runtime() -> None:
+            try:
+                runtime.start()
+            except Exception as exc:
+                start_errors.append(exc)
+
+        def configure_endpoint() -> None:
+            configure_started.set()
+            try:
+                client.configure_endpoint(MavEndpoint(expected_system=8, expected_component=3))
+            except Exception as exc:
+                configure_errors.append(exc)
+            finally:
+                configure_finished.set()
+
+        with patch.object(client, "start", blocking_client_start):
+            starter = threading.Thread(target=start_runtime, daemon=True)
+            starter.start()
+            self.assertTrue(start_entered.wait(1.0))
+            configurer = threading.Thread(target=configure_endpoint, daemon=True)
+            configurer.start()
+            self.assertTrue(configure_started.wait(1.0))
+            configuration_was_serialized = not configure_finished.wait(0.05)
+            release_start.set()
+            starter.join(1.0)
+            configurer.join(1.0)
+
+        self.assertTrue(configuration_was_serialized)
+        self.assertFalse(starter.is_alive())
+        self.assertFalse(configurer.is_alive())
+        self.assertFalse(start_errors)
+        self.assertEqual(len(configure_errors), 1)
+        self.assertIsInstance(configure_errors[0], RuntimeError)
+        self.assertEqual(client.endpoint.expected_system, 7)
+        assert runtime.peer is not None
+        self.assertEqual(runtime.peer._resolve_target(runtime.peer._target_system), 7)
+        runtime.close()
+
     def test_application_role_accepts_explicit_peer_and_source_identity(self) -> None:
         runtime = MavRuntime(
             client=FakeClient([]),  # type: ignore[arg-type]
@@ -619,10 +675,31 @@ class MavRuntimeTests(unittest.TestCase):
                     peer=FakePeer(calls),  # type: ignore[arg-type]
                 )
                 runtime._running = True
-                runtime.router._thread = threading.current_thread()
+                callback_finished = threading.Event()
+                callback_errors: list[Exception] = []
 
-                with self.assertRaisesRegex(RuntimeError, "receive thread"):
-                    getattr(runtime, operation)()
+                def stop_from_reader() -> None:
+                    runtime.router._thread = threading.current_thread()
+                    try:
+                        getattr(runtime, operation)()
+                    except Exception as exc:
+                        callback_errors.append(exc)
+                    finally:
+                        callback_finished.set()
+
+                runtime._lifecycle_lock.acquire()
+                callback = threading.Thread(target=stop_from_reader, daemon=True)
+                try:
+                    callback.start()
+                    rejected_before_unlock = callback_finished.wait(0.1)
+                finally:
+                    runtime._lifecycle_lock.release()
+                callback.join(1.0)
+
+                self.assertTrue(rejected_before_unlock)
+                self.assertFalse(callback.is_alive())
+                self.assertEqual(len(callback_errors), 1)
+                self.assertRegex(str(callback_errors[0]), "receive thread")
                 self.assertEqual(calls, [])
 
                 runtime.router._thread = None
@@ -642,6 +719,7 @@ class MavRuntimeTests(unittest.TestCase):
                 )
                 runtime._running = True
                 callback_errors: list[Exception] = []
+                callback_finished = threading.Event()
 
                 def stop_from_monitor(_state: Any) -> None:
                     peer._monitor_thread = threading.current_thread()
@@ -649,12 +727,20 @@ class MavRuntimeTests(unittest.TestCase):
                         getattr(runtime, operation)()
                     except Exception as exc:
                         callback_errors.append(exc)
+                    finally:
+                        callback_finished.set()
 
                 peer.changed.subscribe(stop_from_monitor)
                 monitor = threading.Thread(target=lambda: peer.changed.publish(None))
-                monitor.start()
+                runtime._lifecycle_lock.acquire()
+                try:
+                    monitor.start()
+                    rejected_before_unlock = callback_finished.wait(0.1)
+                finally:
+                    runtime._lifecycle_lock.release()
                 monitor.join(1.0)
 
+                self.assertTrue(rejected_before_unlock)
                 self.assertFalse(monitor.is_alive())
                 self.assertEqual(len(callback_errors), 1)
                 self.assertRegex(str(callback_errors[0]), "peer monitor thread")
@@ -662,6 +748,226 @@ class MavRuntimeTests(unittest.TestCase):
                 self.assertFalse(any(call.endswith(":stop") for call in calls))
 
                 peer._monitor_thread = None
+                runtime._running = False
+                runtime.close()
+
+    def test_external_shutdown_waiting_for_dispatcher_worker_does_not_deadlock(self) -> None:
+        calls: list[str] = []
+        worker_entered = threading.Event()
+        release_worker = threading.Event()
+        worker_finished = threading.Event()
+        dispatcher_stop_entered = threading.Event()
+        callback_errors: list[Exception] = []
+
+        class WaitingDispatcher(FakeDispatcher):
+            worker_finished_before_stop_return = False
+
+            def stop(self) -> None:
+                dispatcher_stop_entered.set()
+                self.worker_finished_before_stop_return = worker_finished.wait(0.5)
+                super().stop()
+
+        dispatcher = WaitingDispatcher(calls)
+        runtime = MavRuntime(
+            client=FakeClient(calls),  # type: ignore[arg-type]
+            peer=FakePeer(calls),  # type: ignore[arg-type]
+            dispatcher=dispatcher,  # type: ignore[arg-type]
+        )
+        runtime._running = True
+
+        def application_handler() -> None:
+            dispatcher._worker_context.active = True
+            worker_entered.set()
+            release_worker.wait(1.0)
+            try:
+                runtime.stop()
+            except Exception as exc:
+                callback_errors.append(exc)
+            finally:
+                worker_finished.set()
+
+        worker = threading.Thread(target=application_handler, daemon=True)
+        worker.start()
+        self.assertTrue(worker_entered.wait(1.0))
+        stop_errors: list[Exception] = []
+
+        def stop_runtime() -> None:
+            try:
+                runtime.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        stopper = threading.Thread(target=stop_runtime, daemon=True)
+        stopper.start()
+        self.assertTrue(dispatcher_stop_entered.wait(1.0))
+        release_worker.set()
+        worker.join(1.0)
+        stopper.join(1.0)
+
+        self.assertFalse(worker.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(dispatcher.worker_finished_before_stop_return)
+        self.assertEqual(len(callback_errors), 1)
+        self.assertRegex(str(callback_errors[0]), "dispatcher worker")
+        self.assertFalse(stop_errors)
+        self.assertFalse(runtime.running)
+        self.assertFalse(runtime._cleanup_pending)
+        runtime.close()
+
+    def test_external_shutdown_waiting_for_reader_callback_does_not_deadlock(self) -> None:
+        callback_entered = threading.Event()
+        release_callback = threading.Event()
+        callback_finished = threading.Event()
+        client_stop_entered = threading.Event()
+        callback_errors: list[Exception] = []
+
+        class WaitingClient(FakeClient):
+            callback_finished_before_stop_return = False
+
+            def stop(self) -> None:
+                super().stop()
+                client_stop_entered.set()
+                self.callback_finished_before_stop_return = callback_finished.wait(0.5)
+
+        client = WaitingClient([])
+        runtime = MavRuntime(client=client)  # type: ignore[arg-type]
+        runtime._running = True
+
+        def reader_callback() -> None:
+            runtime.router._thread = threading.current_thread()
+            callback_entered.set()
+            release_callback.wait(1.0)
+            try:
+                runtime.stop()
+            except Exception as exc:
+                callback_errors.append(exc)
+            finally:
+                callback_finished.set()
+
+        callback = threading.Thread(target=reader_callback, daemon=True)
+        callback.start()
+        self.assertTrue(callback_entered.wait(1.0))
+        stop_errors: list[Exception] = []
+
+        def stop_runtime() -> None:
+            try:
+                runtime.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        stopper = threading.Thread(target=stop_runtime, daemon=True)
+        stopper.start()
+        self.assertTrue(client_stop_entered.wait(1.0))
+        release_callback.set()
+        callback.join(1.0)
+        stopper.join(1.0)
+
+        self.assertFalse(callback.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(client.callback_finished_before_stop_return)
+        self.assertEqual(len(callback_errors), 1)
+        self.assertRegex(str(callback_errors[0]), "receive thread")
+        self.assertFalse(stop_errors)
+        self.assertFalse(runtime.running)
+        self.assertFalse(runtime._cleanup_pending)
+        runtime.close()
+
+    def test_external_shutdown_waiting_for_peer_monitor_does_not_deadlock(self) -> None:
+        monitor_entered = threading.Event()
+        release_monitor = threading.Event()
+        monitor_finished = threading.Event()
+        peer_stop_entered = threading.Event()
+        callback_errors: list[Exception] = []
+
+        class WaitingPeer(FakePeer):
+            monitor_finished_before_stop_return = False
+
+            def stop(self) -> None:
+                super().stop()
+                peer_stop_entered.set()
+                self.monitor_finished_before_stop_return = monitor_finished.wait(0.5)
+
+        peer = WaitingPeer([])
+        runtime = MavRuntime(
+            client=FakeClient([]),  # type: ignore[arg-type]
+            peer=peer,  # type: ignore[arg-type]
+        )
+        runtime._running = True
+
+        def stop_from_monitor(_state: Any) -> None:
+            peer._monitor_thread = threading.current_thread()
+            monitor_entered.set()
+            release_monitor.wait(1.0)
+            try:
+                runtime.stop()
+            except Exception as exc:
+                callback_errors.append(exc)
+            finally:
+                monitor_finished.set()
+
+        peer.changed.subscribe(stop_from_monitor)
+        monitor = threading.Thread(target=lambda: peer.changed.publish(None), daemon=True)
+        monitor.start()
+        self.assertTrue(monitor_entered.wait(1.0))
+        stop_errors: list[Exception] = []
+
+        def stop_runtime() -> None:
+            try:
+                runtime.stop()
+            except Exception as exc:
+                stop_errors.append(exc)
+
+        stopper = threading.Thread(target=stop_runtime, daemon=True)
+        stopper.start()
+        self.assertTrue(peer_stop_entered.wait(1.0))
+        release_monitor.set()
+        monitor.join(1.0)
+        stopper.join(1.0)
+
+        self.assertFalse(monitor.is_alive())
+        self.assertFalse(stopper.is_alive())
+        self.assertTrue(peer.monitor_finished_before_stop_return)
+        self.assertEqual(len(callback_errors), 1)
+        self.assertRegex(str(callback_errors[0]), "peer monitor thread")
+        self.assertFalse(stop_errors)
+        self.assertFalse(runtime.running)
+        self.assertFalse(runtime._cleanup_pending)
+        runtime.close()
+
+    def test_client_start_callback_rejects_runtime_shutdown_before_lifecycle_lock(self) -> None:
+        for operation in ("stop", "close"):
+            with self.subTest(operation=operation):
+                runtime = MavRuntime(client=FakeClient([]))  # type: ignore[arg-type]
+                runtime._running = True
+                callback_finished = threading.Event()
+                callback_errors: list[Exception] = []
+
+                def shutdown_from_client_start() -> None:
+                    runtime.client._starting_thread = threading.current_thread()
+                    try:
+                        getattr(runtime, operation)()
+                    except Exception as exc:
+                        callback_errors.append(exc)
+                    finally:
+                        callback_finished.set()
+
+                runtime._lifecycle_lock.acquire()
+                callback = threading.Thread(
+                    target=shutdown_from_client_start,
+                    daemon=True,
+                )
+                try:
+                    callback.start()
+                    rejected_before_unlock = callback_finished.wait(0.1)
+                finally:
+                    runtime._lifecycle_lock.release()
+                callback.join(1.0)
+
+                self.assertTrue(rejected_before_unlock)
+                self.assertFalse(callback.is_alive())
+                self.assertEqual(len(callback_errors), 1)
+                self.assertRegex(str(callback_errors[0]), "client startup callback")
+                runtime.client._starting_thread = None
                 runtime._running = False
                 runtime.close()
 

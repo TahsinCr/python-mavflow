@@ -250,9 +250,12 @@ Do not call blocking `runtime.stop()` or `runtime.close()` from a message
 callback. The runtime rejects the operation before tearing down components
 because the router cannot join its own receive thread; schedule lifecycle
 changes from another task or thread. The same rule applies to the peer monitor
-thread. A synchronous `peer.changed` callback during runtime startup also cannot
-reenter `start()`, `stop()`, or `close()`; defer lifecycle changes until startup
-returns.
+thread. A dispatcher worker handler also cannot call runtime shutdown: a
+concurrent shutdown waits for active handlers to return. A synchronous
+`peer.changed` callback during runtime startup cannot reenter `start()`,
+`stop()`, or `close()`, and a `connection_changed(True)` callback cannot call
+`MavClient.stop()` or runtime shutdown while the client is starting. Defer
+lifecycle changes until the callback and startup transition return.
 
 <a id="filtering"></a>
 ### Filtering and message history

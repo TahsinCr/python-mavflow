@@ -36,6 +36,7 @@ class MavClient:
         self.events.add("mavlink.connection.errors", self.connection.errors)
         self.events.add("mavlink.router.errors", self.router.errors)
         self._lifecycle_lock = threading.RLock()
+        self._starting_thread: threading.Thread | None = None
 
     @property
     def endpoint(self) -> MavEndpoint:
@@ -59,9 +60,18 @@ class MavClient:
 
     def start(self) -> None:
         with self._lifecycle_lock:
-            self.router.start()
+            current_thread = threading.current_thread()
+            if self._starting_thread is current_thread:
+                raise RuntimeError("MAVLink client lifecycle cannot reenter its startup callback")
+            self._starting_thread = current_thread
+            try:
+                self.router.start()
+            finally:
+                self._starting_thread = None
 
     def stop(self) -> None:
+        if self._starting_thread is threading.current_thread():
+            raise RuntimeError("MAVLink client cannot stop from a connection startup callback")
         with self._lifecycle_lock:
             self.router.stop()
 

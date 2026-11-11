@@ -107,6 +107,24 @@ def _validate_json_depth(body: str) -> None:
                 raise MavApplicationProtocolError("Uygulama JSON iç içe geçmesi geçersiz")
 
 
+def _validate_json_unicode(value: object) -> None:
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, str):
+            if current.isascii():
+                continue
+            if any(0xD800 <= ord(character) <= 0xDFFF for character in current):
+                raise MavApplicationProtocolError(
+                    "JSON strings cannot contain unpaired Unicode surrogate code points"
+                )
+        elif isinstance(current, dict):
+            pending.extend(current.keys())
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
+
+
 def _raise_invalid_json_constant(value: str) -> None:
     raise ValueError(f"Geçersiz JSON sabiti: {value}")
 
@@ -331,6 +349,7 @@ class MavApplicationCodec:
                 parse_constant=lambda value: _raise_invalid_json_constant(value),
                 object_pairs_hook=_reject_duplicate_json_keys,
             )
+            _validate_json_unicode(decoded)
         except MavApplicationProtocolError:
             raise
         except (UnicodeDecodeError, json.JSONDecodeError, RecursionError, ValueError) as exc:

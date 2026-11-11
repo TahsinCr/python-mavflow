@@ -10,7 +10,9 @@ from unittest.mock import patch
 from eventflow import AsyncEventQueue, EventBus, EventFilter
 
 from mavflow.application import MavApplicationPacket
+from mavflow.client import MavClient
 from mavflow.dispatch import MavApplicationDispatcher
+from mavflow.endpoint import MavEndpoint
 from mavflow.message import MavMessageEnvelope
 from mavflow.peer import MavApplicationPeer
 from mavflow.router import MavMessageRouter
@@ -61,7 +63,53 @@ class _StuckConnection(_RestartableConnection):
         return None
 
 
+class _ClientConnection(_RestartableConnection):
+    def __init__(self) -> None:
+        super().__init__()
+        self.endpoint = MavEndpoint()
+        self.errors = EventBus[Exception]()
+        self.connection_changed = EventBus[bool]()
+        self._connected = False
+        self.target_system = 1
+        self.target_component = 1
+
+    @property
+    def is_connected(self) -> bool:
+        return self._connected
+
+    def start(self) -> None:
+        super().start()
+        self._connected = True
+        self.connection_changed.publish(True)
+
+    def stop(self) -> None:
+        super().stop()
+        self._connected = False
+        self.connection_changed.publish(False)
+
+
 class RouterLifecycleTests(unittest.TestCase):
+    def test_client_rejects_stop_from_connection_start_callback(self) -> None:
+        connection = _ClientConnection()
+        client = MavClient(connection=connection)  # type: ignore[arg-type]
+        callback_errors: list[Exception] = []
+
+        def stop_during_connect(connected: bool) -> None:
+            if connected:
+                try:
+                    client.stop()
+                except Exception as exc:
+                    callback_errors.append(exc)
+
+        connection.connection_changed.subscribe(stop_during_connect)
+        client.start()
+        self.addCleanup(client.stop)
+
+        self.assertEqual(len(callback_errors), 1)
+        self.assertRegex(str(callback_errors[0]), "startup callback")
+        self.assertTrue(connection.is_connected)
+        self.assertTrue(client.router.running)
+
     def test_router_can_start_stop_and_restart(self) -> None:
         connection = _RestartableConnection()
         router = MavMessageRouter(

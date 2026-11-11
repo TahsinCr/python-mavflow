@@ -4,6 +4,16 @@ All notable changes to Mavflow are documented here.
 
 ## [Unreleased]
 
+### Fixed
+
+- Reject runtime shutdown from dispatcher, router, and peer-monitor callback
+  threads before acquiring the runtime lifecycle lock, preventing cross-thread
+  shutdown deadlocks.
+- Serialize runtime peer-identity validation with client startup and reject
+  reentrant client lifecycle calls from a connection startup callback.
+- Reject decoded JSON strings containing unpaired Unicode surrogates so decode
+  and UTF-8 re-encoding accept the same wire-format values.
+
 ### Added
 
 - Support explicit system/component source pairs through application channel

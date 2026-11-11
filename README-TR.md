@@ -249,9 +249,12 @@ Mesaj callback'i içinden bloklayan `runtime.stop()` veya `runtime.close()`
 çağırmayın. Router kendi receive thread'ini join edemediği için runtime
 bileşenleri kapatmaya başlamadan işlemi reddeder; yaşam döngüsü değişikliklerini
 başka bir task veya thread'den başlatın. Aynı kural peer monitor thread'i için
-de geçerlidir. Runtime başlatılırken senkron `peer.changed` callback'i içinden
-`start()`, `stop()` veya `close()` yeniden çağrılamaz; yaşam döngüsü
-değişikliklerini başlangıç tamamlandıktan sonra başlatın.
+de geçerlidir. Dispatcher worker'ında çalışan handler da runtime kapatamaz;
+eşzamanlı kapatma aktif handler'ların bitmesini bekler. Runtime başlatılırken
+senkron `peer.changed` callback'i içinden `start()`, `stop()` veya `close()`;
+client başlatılırken `connection_changed(True)` callback'i içinden
+`MavClient.stop()` veya runtime kapatma işlemi yeniden çağrılamaz. Yaşam döngüsü
+değişikliklerini callback ve başlangıç geçişi tamamlandıktan sonra başlatın.
 
 <a id="filtering"></a>
 ### Filtreleme ve mesaj geçmişi
