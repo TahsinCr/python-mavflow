@@ -236,6 +236,50 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertEqual(connection.stop_attempts, 3)
         runtime.close()
 
+    def test_runtime_retries_channel_cleanup_after_partial_peer_start_failure(self) -> None:
+        calls: list[str] = []
+        client = FakeClient(calls)
+
+        class PartialStartChannel(MavApplicationChannel):
+            def __init__(self) -> None:
+                super().__init__(client)  # type: ignore[arg-type]
+                self.stop_attempts = 0
+
+            def start(self) -> None:
+                super().start()
+                raise OSError("channel startup failed")
+
+            def stop(self) -> None:
+                self.stop_attempts += 1
+                if self.stop_attempts <= 2:
+                    raise OSError("channel cleanup failed")
+                super().stop()
+
+        channel = PartialStartChannel()
+        peer = MavApplicationPeer(
+            channel,
+            role="onboard",
+            transport_available=lambda: False,
+            heartbeat_interval=60.0,
+            heartbeat_timeout=120.0,
+            stop_timeout=0.1,
+        )
+        runtime = MavRuntime(client=client, peer=peer)  # type: ignore[arg-type]
+
+        with self.assertRaisesRegex(OSError, "channel startup failed"):
+            runtime.start()
+
+        self.assertTrue(peer._channel_cleanup_pending)
+        self.assertTrue(runtime._cleanup_pending)
+        self.assertEqual(channel.stop_attempts, 2)
+
+        runtime.stop()
+
+        self.assertFalse(peer._channel_cleanup_pending)
+        self.assertFalse(runtime._cleanup_pending)
+        self.assertEqual(channel.stop_attempts, 3)
+        runtime.close()
+
     def test_start_and_stop_are_serialized_across_the_full_transition(self) -> None:
         calls: list[str] = []
         entered = threading.Event()
@@ -1001,6 +1045,51 @@ class MavRuntimeTests(unittest.TestCase):
         self.assertTrue(all("startup callback" in str(error) for error in callback_errors))
         self.assertTrue(runtime.running)
         self.assertEqual(calls[:3], ["client:start", "peer:start", "dispatcher:start"])
+        runtime.close()
+
+    def test_peer_stop_from_startup_callback_keeps_runtime_components_running(self) -> None:
+        calls: list[str] = []
+        client = FakeClient(calls)
+        channel = MavApplicationChannel(client)  # type: ignore[arg-type]
+        peer = MavApplicationPeer(
+            channel,
+            role="onboard",
+            transport_available=lambda: False,
+            heartbeat_interval=60.0,
+            heartbeat_timeout=120.0,
+            stop_timeout=0.1,
+        )
+        runtime = MavRuntime(client=client, peer=peer)  # type: ignore[arg-type]
+        callback_errors: list[Exception] = []
+        callback_attempted = False
+        callback_lock = threading.Lock()
+
+        def stop_from_running_notification(state: Any) -> None:
+            nonlocal callback_attempted
+            if state.running:
+                with callback_lock:
+                    if callback_attempted:
+                        return
+                    callback_attempted = True
+                try:
+                    peer.stop()
+                except RuntimeError as exc:
+                    callback_errors.append(exc)
+
+        peer.changed.subscribe(stop_from_running_notification)
+        runtime.start()
+
+        self.assertEqual(len(callback_errors), 1)
+        self.assertIn("startup callback", str(callback_errors[0]))
+        self.assertTrue(runtime.running)
+        self.assertTrue(peer.running)
+        self.assertTrue(runtime.dispatcher.running)
+
+        runtime.stop()
+
+        self.assertFalse(runtime.running)
+        self.assertFalse(peer.running)
+        self.assertFalse(runtime.dispatcher.running)
         runtime.close()
 
     def test_failed_shutdown_is_reported_and_can_be_retried(self) -> None:

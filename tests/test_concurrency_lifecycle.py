@@ -485,6 +485,38 @@ class PeerLifecycleTests(unittest.TestCase):
         self.assertFalse(channel.started)
         self.assertFalse(peer._channel_cleanup_pending)
 
+    def test_changed_callback_cannot_stop_peer_during_start(self) -> None:
+        channel = _ChannelStub()
+        peer = self._peer(channel, transport_available=lambda: False)
+        callback_errors: list[Exception] = []
+        callback_attempted = False
+        callback_lock = threading.Lock()
+
+        def stop_on_running_state(state: Any) -> None:
+            nonlocal callback_attempted
+            if state.running:
+                with callback_lock:
+                    if callback_attempted:
+                        return
+                    callback_attempted = True
+                try:
+                    peer.stop()
+                except RuntimeError as exc:
+                    callback_errors.append(exc)
+
+        peer.changed.subscribe(stop_on_running_state)
+        peer.start()
+
+        self.assertEqual(len(callback_errors), 1)
+        self.assertIn("startup callback", str(callback_errors[0]))
+        self.assertTrue(peer.running)
+        self.assertTrue(channel.started)
+
+        peer.stop()
+
+        self.assertFalse(peer.running)
+        self.assertFalse(channel.started)
+
     def test_monitor_callback_cannot_restart_peer_while_external_stop_waits(self) -> None:
         class SignalingChannel(_ChannelStub):
             def __init__(self) -> None:

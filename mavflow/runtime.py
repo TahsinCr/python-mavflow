@@ -200,11 +200,11 @@ class MavRuntime:
                     cleanup_callbacks.append(self.client.stop)
                     self.client.start()
                 if self.peer is not None:
-                    self.peer.start()
                     cleanup_callbacks.append(self.peer.stop)
+                    self.peer.start()
                 elif self.channel is not None:
-                    self.channel.start()
                     cleanup_callbacks.append(self.channel.stop)
+                    self.channel.start()
                 if self.dispatcher is not None:
                     self.dispatcher.start()
                     cleanup_callbacks.append(self.dispatcher.stop)

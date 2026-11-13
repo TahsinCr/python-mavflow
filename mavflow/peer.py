@@ -119,6 +119,7 @@ class MavApplicationPeer:
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._monitor_thread: threading.Thread | None = None
+        self._starting_thread: threading.Thread | None = None
 
         self.packets = channel.packets
         self.changed = EventBus[MavApplicationPeerState]()
@@ -193,9 +194,15 @@ class MavApplicationPeer:
                     self._state = replace(self._state, running=False)
                 raise
             self._wake.set()
-            self.changed.publish(self.state)
+            self._starting_thread = threading.current_thread()
+            try:
+                self.changed.publish(self.state)
+            finally:
+                self._starting_thread = None
 
     def stop(self) -> None:
+        if self._starting_thread is threading.current_thread():
+            raise RuntimeError("Application peer cannot stop from its startup callback")
         if self._monitor_thread is threading.current_thread():
             raise RuntimeError("Application peer cannot stop from its monitor thread")
         with self._lifecycle_lock:
