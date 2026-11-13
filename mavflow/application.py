@@ -41,6 +41,8 @@ class MavApplicationProtocolError(ValueError):
 def _normalize_source_id(value: int | None, name: str) -> int | None:
     if value is None:
         return None
+    if isinstance(value, bool) or not isinstance(value, int):
+        raise ValueError(f"{name} tamsayı olmalı")
     normalized = int(value)
     if not 0 <= normalized <= 255:
         raise ValueError(f"{name} 0..255 aralığında olmalı")
@@ -181,7 +183,10 @@ class MavApplicationPacket:
             raise ValueError(
                 f"Uygulama paket tipi en fazla {_MAX_PACKET_TYPE_LENGTH} karakter olabilir"
             )
-        if not 0 < int(self.packet_id) <= 0xFFFFFFFF:
+        if isinstance(self.packet_id, bool) or not isinstance(self.packet_id, int):
+            raise ValueError("Uygulama paket kimliği tamsayı olmalı")
+        packet_id = int(self.packet_id)
+        if not 0 < packet_id <= 0xFFFFFFFF:
             raise ValueError("Uygulama paket kimliği 1..2^32-1 aralığında olmalı")
         sent_at = float(self.sent_at)
         if not math.isfinite(sent_at) or sent_at <= 0:
@@ -200,7 +205,7 @@ class MavApplicationPacket:
         )
         object.__setattr__(self, "packet_type", normalized_type)
         object.__setattr__(self, "payload", self._freeze_payload_value(payload))
-        object.__setattr__(self, "packet_id", int(self.packet_id))
+        object.__setattr__(self, "packet_id", packet_id)
         object.__setattr__(self, "sent_at", sent_at)
         object.__setattr__(self, "source_system", source_system)
         object.__setattr__(self, "source_component", source_component)

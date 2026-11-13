@@ -82,6 +82,19 @@ class ApplicationPacketTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     MavApplicationPacket(packet_type, payload, packet_id=packet_id)  # type: ignore[arg-type]
 
+    def test_packet_and_source_ids_reject_coercible_non_integer_values(self) -> None:
+        for packet_id in (True, 1.0, 1.9, "42"):
+            with self.subTest(packet_id=packet_id), self.assertRaises(ValueError):
+                MavApplicationPacket("status", packet_id=packet_id)  # type: ignore[arg-type]
+
+        for field in ("source_system", "source_component"):
+            for source_id in (True, 1.0, 1.9, "42"):
+                with (
+                    self.subTest(field=field, source_id=source_id),
+                    self.assertRaises(ValueError),
+                ):
+                    MavApplicationPacket("status", **{field: source_id})  # type: ignore[arg-type]
+
 
 class ApplicationCodecTests(unittest.TestCase):
     def test_single_fragment_round_trip(self) -> None:
