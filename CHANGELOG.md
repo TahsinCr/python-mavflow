@@ -4,6 +4,8 @@ All notable changes to Mavflow are documented here.
 
 ## [Unreleased]
 
+## [v2.0] - 2026-11-13
+
 ### Fixed
 
 - Reject runtime `start()` and `reconnect()` calls from managed dispatcher,
@@ -11,6 +13,12 @@ All notable changes to Mavflow are documented here.
   apply the same early guard to direct client and peer lifecycle entry points.
 - Reject remote-log text fields that cannot be encoded as UTF-8 when the record
   is created.
+- Retry peer and channel cleanup through the runtime when application startup
+  fails before completing.
+- Reject peer shutdown reentry from its startup state callback before changing
+  runtime-owned component state.
+- Return stable error codes for unexpected handler failures and invalid handler
+  responses without exposing exception class names to remote peers.
 - Serialize runtime peer-identity validation with client startup and reject
   reentrant client lifecycle calls from a connection startup callback.
 - Reject decoded JSON strings containing unpaired Unicode surrogates so decode
@@ -37,6 +45,8 @@ All notable changes to Mavflow are documented here.
 
 ### Changed
 
+- Require integer packet and source identities; reject booleans, floats, and
+  numeric strings instead of silently converting them.
 - Submit automatic responses for unknown application requests to EventFlow's
   bounded dispatcher pool; pool saturation now reports an error and leaves the
   caller to its request deadline instead of sending on the router thread.

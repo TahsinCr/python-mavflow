@@ -74,8 +74,8 @@ python -m pip install mavflow
 The distribution and import package are both named `mavflow`. Its required
 dependencies, `flowevent` and `pymavlink`, are installed automatically.
 `flowevent` supplies event buses and subscription handles; Mavflow uses those
-types directly. The current 2.0 development line requires the published
-EventFlow 1.3.2 release (`flowevent>=1.3.2,<1.4`).
+types directly. Mavflow 2.0 requires the published EventFlow 1.3.2 release
+(`flowevent>=1.3.2,<1.4`).
 
 For editable development, install the development tools:
 
@@ -252,8 +252,9 @@ These calls are rejected before the runtime lifecycle lock is acquired, because
 shutdown can wait for the callback's thread. Direct client `start()`, `stop()`,
 and `configure_endpoint()` calls are likewise rejected from its reader or
 connection-start callback. A peer monitor callback cannot call peer `start()`
-or `stop()`. Change lifecycle from another task or thread after the callback
-returns; endpoint configuration is supported only while the client is stopped.
+or `stop()`, and a peer startup `changed` callback cannot call `peer.stop()`.
+Change lifecycle from another task or thread after the callback returns;
+endpoint configuration is supported only while the client is stopped.
 
 <a id="filtering"></a>
 ### Filtering and message history
@@ -458,6 +459,8 @@ fragments during decode. `MavApplicationAssembler` reassembles fragments
 while bounding incomplete packet count, memory, and lifetime. It also limits
 incomplete packet count and bytes per MAVLink source so a single sender cannot
 consume the entire shared budget.
+Packet IDs must be non-boolean integers in `1..2^32-1`; optional source IDs
+must be non-boolean integers in `0..255`. Floats and numeric strings are rejected.
 
 The codec can be used without opening a vehicle connection:
 

@@ -74,7 +74,7 @@ python -m pip install mavflow
 Dağıtımın ve Python import paketinin adı `mavflow`'dur. Zorunlu bağımlılıklar
 olan `flowevent` ve `pymavlink` kurulum sırasında yüklenir. `flowevent` event
 bus ve abonelik handle'larını sağlar; Mavflow bu tipleri doğrudan kullanır.
-Geliştirilmekte olan 2.0 serisi yayımlanmış EventFlow 1.3.2 sürümünü
+Mavflow 2.0, yayımlanmış EventFlow 1.3.2 sürümünü
 (`flowevent>=1.3.2,<1.4`) ister.
 
 Düzenlenebilir geliştirme kurulumu ve araçları için:
@@ -251,8 +251,9 @@ callback'i içinden runtime `start()`, `stop()`, `reconnect()` ya da `close()`
 çağrılar runtime lifecycle kilidi alınmadan reddedilir. Doğrudan client
 `start()`, `stop()` ve `configure_endpoint()` çağrıları da reader veya bağlantı
 başlangıç callback'i içinden reddedilir. Peer monitor callback'i peer
-`start()`/`stop()` çağrısı yapamaz. Yaşam döngüsünü callback döndükten sonra
-başka bir task veya thread'den yönetin; endpoint yalnızca durmuş client'ta
+`start()`/`stop()` çağrısı yapamaz; peer başlangıcındaki `changed` callback'i de
+`peer.stop()` çağıramaz. Yaşam döngüsünü callback döndükten sonra başka bir
+task veya thread'den yönetin; endpoint yalnızca durmuş client'ta
 yapılandırılabilir.
 
 <a id="filtering"></a>
@@ -458,7 +459,10 @@ zaman damgası, kaynak kimlikleri ve yanıt bayrağını taşır.
 ekler ve decode sırasında parçaları doğrular. `MavApplicationAssembler`
 eksik paketlerin sayısını, belleğini ve yaşam süresini sınırlandırarak
 parçaları birleştirir. Ayrıca tek MAVLink kaynağının paylaşılan bütçenin tümünü
-tüketmemesi için kaynak başına eksik paket ve byte sınırı uygular.
+tüketmemesi için kaynak başına eksik paket ve byte sınırı uygular. Paket ID'si
+`1..2^32-1` aralığında bool olmayan bir tamsayı olmalıdır; isteğe bağlı kaynak
+ID'leri `0..255` aralığında bool olmayan tamsayılar olmalıdır. Float ve sayısal
+string değerler reddedilir.
 
 Codec araç bağlantısı açılmadan da kullanılabilir:
 
