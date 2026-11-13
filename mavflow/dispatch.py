@@ -287,7 +287,7 @@ class MavApplicationDispatcher:
             error = exc
             result = MavApplicationResult.failure(
                 "Application handler failed",
-                {"error_type": exc.__class__.__name__},
+                {"error_type": "HandlerError"},
             )
         if packet.expects_response:
             try:
@@ -304,7 +304,7 @@ class MavApplicationDispatcher:
                     error = exc
                 result = MavApplicationResult.failure(
                     "Application handler returned an invalid response",
-                    {"error_type": exc.__class__.__name__},
+                    {"error_type": "InvalidResponse"},
                 )
                 response_payload = self._response_payload(packet, result)
         else:

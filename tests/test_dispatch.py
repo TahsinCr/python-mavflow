@@ -166,6 +166,10 @@ class DispatcherContractTests(unittest.TestCase):
                 self.assertEqual(result.message, "Application handler failed")
                 self.assertEqual(peer.sent[-1][0], "system.error")
                 self.assertEqual(peer.sent[-1][1]["request_id"], 70 + index)
+                self.assertEqual(
+                    peer.sent[-1][1]["error_type"],
+                    "HandlerError",
+                )
                 self.assertNotIn("postgresql://", repr(peer.sent[-1][1]))
 
         self.assertEqual(len(errors), 2)
@@ -196,6 +200,7 @@ class DispatcherContractTests(unittest.TestCase):
         self.assertFalse(handled[0].result.accepted)
         self.assertEqual(peer.sent[0][0], "system.error")
         self.assertEqual(peer.sent[0][1]["request_id"], 89)
+        self.assertEqual(peer.sent[0][1]["error_type"], "InvalidResponse")
         self.assertEqual(len(errors), 1)
         self.assertIsInstance(errors[0], MavApplicationProtocolError)
 
